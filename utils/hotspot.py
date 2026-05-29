@@ -22,8 +22,8 @@ class HotspotManager:
         if not isinstance(config, dict):
             config = {}
         return {
-            "ssid": config.get("ssid", "sruijiem"), # 默认SSID
-            "password": config.get("password", "12345678"), # 默认密码
+"ssid": config.get("ssid", "test"),      # 默认SSID
+"password": config.get("password", "12345678"),  # 默认密码
             "band": config.get("band", "2.4GHz")    # 默认频段
         }
 

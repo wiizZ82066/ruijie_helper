@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
     QMessageBox, QGroupBox, QFrame, QLineEdit, QComboBox
 )
-from PySide6.QtGui import QIcon, QPixmap, QFont, QPainter, QColor, QBrush
-from PySide6.QtCore import Qt, QTimer, QRect, Signal
+from PySide6.QtGui import QIcon, QPixmap, QFont, QPainter, QColor, QBrush, QLinearGradient, QPen
+from PySide6.QtCore import Qt, QTimer, QRect, Signal, QPropertyAnimation, QEasingCurve, Property
 
 from utils.network_adapter import NetworkAdapterManager     # 网卡管理
 from utils.supplicant import SupplicantManager, SupplicantConfig    # 认证客户端
@@ -25,72 +25,313 @@ def load_icon():
     return QIcon()
 
 class SwitchButton(QPushButton):
-    """自定义的滑动开关按钮，用于显示启用/禁用状态。"""
+    """自定义滑动开关 — 暗色工业风，带渐变色背景和平滑动画。"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setCheckable(True)     # 选中/取消
-        self.setFixedSize(75, 35)   # 大小
-        self.setCursor(Qt.PointingHandCursor)   # 手形光标
-        self._enabled_color = QColor("#4CAF50") # 启用状态颜色
-        self._disabled_color = QColor("#F44336")    # 关闭状态颜色
-        self._thumb_color = QColor("#FFFFFF")   # 滑块颜色
+        self.setCheckable(True)
+        self.setFixedSize(64, 32)
+        self.setCursor(Qt.PointingHandCursor)
+        # 颜色常量
+        self._on_color = QColor("#00d4aa")      # 青绿色 — 启用
+        self._off_color = QColor("#3a3f47")     # 暗灰色 — 关闭
+        self._thumb_color = QColor("#e8eaed")   # 浅灰滑块
+        self._border_color = QColor("#2d333b")  # 边框色
+        # 动画偏移量
+        self._thumb_offset = 3
+        self._anim = QPropertyAnimation(self, b"thumb_offset")
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, checked):
+        """切换时启动滑块位移动画。"""
+        self._anim.stop()
+        self._anim.setStartValue(self._thumb_offset)
+        self._anim.setEndValue(self.width() - 27 if checked else 3)
+        self._anim.start()
+
+    def get_thumb_offset(self):
+        return self._thumb_offset
+
+    def set_thumb_offset(self, val):
+        self._thumb_offset = val
+        self.update()
+
+    thumb_offset = Property(float, get_thumb_offset, set_thumb_offset)
 
     def paintEvent(self, event):
-        """自绘开关：圆角背景、圆形滑块、状态图标。"""
+        """自绘开关：圆角轨 + 发光滑块。"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
-        # 背景色
-        bg = self._enabled_color if self.isChecked() else self._disabled_color
-        painter.setBrush(QBrush(bg))
+        w, h = rect.width(), rect.height()
+
+        # 轨道背景
+        track_rect = QRect(0, 0, w, h)
+        if self.isChecked():
+            track_color = QColor("#0f5c4a")
+        else:
+            track_color = QColor("#2d333b")
+        painter.setPen(QPen(QColor("#1c2128"), 1.5))
+        painter.setBrush(QBrush(track_color))
+        painter.drawRoundedRect(track_rect.adjusted(1, 1, -1, -1), h // 2, h // 2)
+
+        # 滑块
+        thumb_d = h - 10
+        offset = int(self._thumb_offset)
+        y = (h - thumb_d) // 2
+        thumb_rect = QRect(offset, y, thumb_d, thumb_d)
+
+        if self.isChecked():
+            gradient = QLinearGradient(thumb_rect.topLeft(), thumb_rect.bottomRight())
+            gradient.setColorAt(0, QColor("#00d4aa"))
+            gradient.setColorAt(1, QColor("#00a884"))
+            painter.setBrush(QBrush(gradient))
+        else:
+            painter.setBrush(QBrush(QColor("#5c6370")))
         painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(rect.adjusted(1,1,-1,-1), 17, 17)
-        #圆形滑块
-        thumb_r = 12
-        x = rect.width() - thumb_r - 5 if self.isChecked() else thumb_r + 3
-        painter.setBrush(QBrush(self._thumb_color))
-        painter.drawEllipse(QRect(int(x)-thumb_r, rect.center().y()-thumb_r, thumb_r*2, thumb_r*2))
-        #状态图标
-        icon = "✅" if self.isChecked() else "❌"
-        font = QFont("Segoe UI Emoji", 12)
+        painter.drawEllipse(thumb_rect)
+
+        # 状态图标（微缩）
+        font = QFont("Segoe UI", 9 if self.isChecked() else 8)
         painter.setFont(font)
-        painter.setPen(Qt.white)
-        icon_x = 10 if self.isChecked() else rect.width() - 36
-        painter.drawText(QRect(icon_x, 0, 26, rect.height()), Qt.AlignCenter, icon)
+        painter.setPen(QColor("#0d1117") if self.isChecked() else QColor("#e8eaed"))
+        icon_str = "ON" if self.isChecked() else "OFF"
+        label_rect = QRect(thumb_rect.right() + 4 if self.isChecked() else 3, 0, 28, h)
+        painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, icon_str)
+
 
 class MainWindow(QMainWindow):
-    """主窗口，左侧导航列表 + 右侧堆叠页面。"""
+    """主窗口 — 暗色工业风：左侧导航栏 + 右侧内容区。"""
+
+    # 全局暗色主题样式表
+    GLOBAL_STYLE = """
+    QMainWindow {
+        background-color: #0d1117;
+    }
+    QWidget {
+        background-color: #0d1117;
+        color: #c9d1d9;
+        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+        font-size: 13px;
+    }
+    QListWidget {
+        background-color: #161b22;
+        border: none;
+        border-right: 1px solid #21262d;
+        outline: none;
+        padding: 8px 0px;
+    }
+    QListWidget::item {
+        color: #8b949e;
+        padding: 14px 20px;
+        margin: 2px 10px;
+        border-radius: 8px;
+        font-size: 13px;
+    }
+    QListWidget::item:selected {
+        background-color: #1f2a37;
+        color: #00d4aa;
+        border-left: 3px solid #00d4aa;
+    }
+    QListWidget::item:hover:!selected {
+        background-color: #1c2128;
+        color: #c9d1d9;
+    }
+    QGroupBox {
+        background-color: #161b22;
+        border: 1px solid #21262d;
+        border-radius: 10px;
+        margin-top: 18px;
+        padding: 20px 16px 12px 16px;
+        font-size: 14px;
+        font-weight: bold;
+        color: #c9d1d9;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 16px;
+        padding: 0 8px;
+        color: #00d4aa;
+    }
+    QLabel {
+        background-color: transparent;
+        color: #c9d1d9;
+    }
+    QLineEdit {
+        background-color: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 8px 12px;
+        color: #c9d1d9;
+        font-size: 13px;
+        selection-background-color: #1f6feb;
+    }
+    QLineEdit:focus {
+        border-color: #00d4aa;
+    }
+    QLineEdit:disabled {
+        background-color: #161b22;
+        color: #484f58;
+    }
+    QComboBox {
+        background-color: #0d1117;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 8px 12px;
+        color: #c9d1d9;
+        font-size: 13px;
+        min-width: 120px;
+    }
+    QComboBox:focus {
+        border-color: #00d4aa;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 24px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 4px;
+        selection-background-color: #1f2a37;
+        selection-color: #00d4aa;
+        color: #c9d1d9;
+    }
+    QPushButton {
+        background-color: #21262d;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 8px 16px;
+        color: #c9d1d9;
+        font-size: 13px;
+        min-height: 32px;
+    }
+    QPushButton:hover {
+        background-color: #30363d;
+        border-color: #00d4aa;
+    }
+    QPushButton:pressed {
+        background-color: #0d1117;
+    }
+    QPushButton:disabled {
+        background-color: #161b22;
+        color: #484f58;
+        border-color: #21262d;
+    }
+    QTableWidget {
+        background-color: #0d1117;
+        alternate-background-color: #161b22;
+        border: 1px solid #21262d;
+        border-radius: 6px;
+        gridline-color: #21262d;
+        color: #c9d1d9;
+        selection-background-color: #1f2a37;
+    }
+    QTableWidget::item {
+        padding: 4px 8px;
+    }
+    QHeaderView::section {
+        background-color: #161b22;
+        color: #8b949e;
+        border: none;
+        border-bottom: 2px solid #21262d;
+        padding: 10px 8px;
+        font-weight: bold;
+    }
+    QFrame {
+        background-color: transparent;
+    }
+    QScrollBar:vertical {
+        background-color: #0d1117;
+        width: 8px;
+        border-radius: 4px;
+    }
+    QScrollBar::handle:vertical {
+        background-color: #30363d;
+        border-radius: 4px;
+        min-height: 30px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background-color: #484f58;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+    """
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("校园网认证助手")
+        self.setStyleSheet(self.GLOBAL_STYLE)
         icon = load_icon()
         if not icon.isNull():
             self.setWindowIcon(icon)
-        self.resize(900, 650)
+        self.resize(960, 680)
+        self.setMinimumSize(800, 560)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         main_layout = QHBoxLayout(self.central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # 左侧列表
+        # ---- 左侧导航栏 ----
+        nav_container = QWidget()
+        nav_container.setFixedWidth(200)
+        nav_container.setStyleSheet("background-color: #161b22; border-right: 1px solid #21262d;")
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(0)
+
+        # 应用标题
+        title_label = QLabel("  CAMPUS AUTH")
+        title_label.setFont(QFont("Consolas", 13, QFont.Bold))
+        title_label.setStyleSheet("""
+            color: #00d4aa;
+            padding: 20px 16px 12px 16px;
+            background-color: transparent;
+            letter-spacing: 2px;
+        """)
+        title_label.setFixedHeight(52)
+        nav_layout.addWidget(title_label)
+
+        # 分割线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("background-color: #21262d; max-height: 1px;")
+        nav_layout.addWidget(sep)
+
         self.func_list = QListWidget()
-        self.func_list.addItems(["🔥 热点", "🖧 网卡管理"])
+        self.func_list.addItems(["  🔥  热点管理", "  🖧  网卡控制"])
         self.func_list.setFont(QFont("Microsoft YaHei", 12))
-        self.func_list.setStyleSheet("QListWidget::item { padding: 15px; }")
-        self.func_list.setFixedWidth(160)
+        self.func_list.setSpacing(2)
         self.func_list.currentRowChanged.connect(self.switch_page)
+        nav_layout.addWidget(self.func_list, 1)
 
-        # 右侧堆叠
+        # 底部版本号
+        ver = QLabel("  v3.0.0")
+        ver.setStyleSheet("color: #484f58; padding: 8px 16px; font-size: 11px; background-color: transparent;")
+        ver.setFixedHeight(30)
+        nav_layout.addWidget(ver)
+
+        main_layout.addWidget(nav_container)
+
+        # ---- 右侧内容区 ----
+        content_container = QWidget()
+        content_container.setStyleSheet("background-color: #0d1117;")
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
         self.stack = QStackedWidget()
         self.page_hotspot = HotspotPage()
         self.page_network = NetworkPage()
         self.stack.addWidget(self.page_hotspot)
         self.stack.addWidget(self.page_network)
+        content_layout.addWidget(self.stack)
 
-        main_layout.addWidget(self.func_list)
-        main_layout.addWidget(self.stack, 1)
-        self.func_list.setCurrentRow(0)     # 默认首页
+        main_layout.addWidget(content_container, 1)
+        self.func_list.setCurrentRow(0)
 
     def switch_page(self, index):
         """切换页面并触发对应页面的刷新。"""
@@ -105,49 +346,86 @@ class NetworkPage(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
-        # ---- 8021x.exe 路径展示 ----
-        path_layout = QHBoxLayout()
-        path_layout.addWidget(QLabel("8021x.exe 路径:"))
+        # ---- 8021x 路径 & 启动 分组 ----
+        exe_group = QGroupBox("8021x 启动器")
+        exe_layout = QVBoxLayout(exe_group)
+        exe_layout.setSpacing(10)
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+        path_row.addWidget(QLabel("路径:"))
         self.exe_path_label = QLabel("未运行")
-        self.exe_path_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        self.exe_path_label.setMinimumWidth(200)
-        path_layout.addWidget(self.exe_path_label, 1)
-        layout.addLayout(path_layout)
+        self.exe_path_label.setStyleSheet("""
+            QLabel {
+                background-color: #0d1117;
+                border: 1px solid #21262d;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #8b949e;
+                font-family: "Consolas";
+                font-size: 11px;
+            }
+        """)
+        self.exe_path_label.setMinimumHeight(30)
+        self.exe_path_label.setWordWrap(True)
+        path_row.addWidget(self.exe_path_label, 1)
+        exe_layout.addLayout(path_row)
 
-        # ---- 选择程序和启动按钮 ----
-        btn_layout = QHBoxLayout()
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         self.choose_btn = QPushButton("📂 选择程序")
-        self.start_btn = QPushButton("▶️ 启动")
+        self.start_btn = QPushButton("▶ 启动")
         for btn in (self.choose_btn, self.start_btn):
-            btn.setFont(QFont("Microsoft YaHei", 10))
-            btn.setMinimumHeight(32)
+            btn.setMinimumHeight(34)
+            btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.setStyleSheet("QPushButton { background-color: #1f4d34; border-color: #238636; } QPushButton:hover { background-color: #238636; border-color: #00d4aa; }")
         self.choose_btn.clicked.connect(self.choose_exe)
         self.start_btn.clicked.connect(self.start_exe)
-        btn_layout.addWidget(self.choose_btn)
-        btn_layout.addWidget(self.start_btn)
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
+        btn_row.addWidget(self.choose_btn)
+        btn_row.addWidget(self.start_btn)
+        btn_row.addStretch()
+        exe_layout.addLayout(btn_row)
+        layout.addWidget(exe_group)
 
-        # ---- 网卡列表表格 ----
+        # ---- 网卡列表分组 ----
+        nic_group = QGroupBox("网络适配器")
+        nic_layout = QVBoxLayout(nic_group)
+        nic_layout.setSpacing(10)
+
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["网卡", "状态", "控制"])
+        self.table.setHorizontalHeaderLabels(["网卡名称", "状态", "控制"])
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(True)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.Stretch)
         h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.verticalHeader().setDefaultSectionSize(40)
-        layout.addWidget(self.table, 1)
+        self.table.verticalHeader().setDefaultSectionSize(42)
+        h.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #161b22;
+                color: #8b949e;
+                border: none;
+                border-bottom: 2px solid #00d4aa;
+                padding: 10px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+        """)
+        nic_layout.addWidget(self.table, 1)
 
-        # ---- 刷新按钮 ----
         refresh_btn = QPushButton("🔄 刷新列表")
-        refresh_btn.setMinimumHeight(32)
+        refresh_btn.setMinimumHeight(34)
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setStyleSheet("QPushButton { background-color: #1f2a37; } QPushButton:hover { background-color: #263850; border-color: #58a6ff; }")
         refresh_btn.clicked.connect(self.refresh)
-        layout.addWidget(refresh_btn)
+        nic_layout.addWidget(refresh_btn)
+        layout.addWidget(nic_group, 1)
 
-        # ---- 选择路径 ----
         self.manual_exe_path = None
         self.refresh()
 
@@ -177,15 +455,18 @@ class NetworkPage(QWidget):
         self.table.setRowCount(len(adapters))
         for row, (name, status_en) in enumerate(adapters):
             # 网卡名称
-            self.table.setItem(row, 0, QTableWidgetItem(name))
-            # 状态图标
-            status_emoji = "✅" if status_en == "Enabled" else "❌"
-            item = QTableWidgetItem(status_emoji)
-            item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 1, item)
+            name_item = QTableWidgetItem(name)
+            self.table.setItem(row, 0, name_item)
+            # 状态指示
+            is_enabled = status_en == "Enabled"
+            status_str = "● 已启用" if is_enabled else "○ 已禁用"
+            status_item = QTableWidgetItem(status_str)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            status_item.setForeground(QColor("#7ee787") if is_enabled else QColor("#8b949e"))
+            self.table.setItem(row, 1, status_item)
             # 开关按钮
             switch = SwitchButton()
-            switch.setChecked(status_en == "Enabled")
+            switch.setChecked(is_enabled)
             switch.clicked.connect(lambda checked, n=name: self.toggle_adapter(n))
             self.table.setCellWidget(row, 2, switch)
 
@@ -205,153 +486,216 @@ class NetworkPage(QWidget):
             QMessageBox.warning(self, "错误", "操作失败，请确认以管理员权限运行")
 
 class HotspotPage(QWidget):
-    """热点管理页面：监控 8021x 进程、移动/恢复文件、管理移动热点。"""
-    _signal = Signal(bool, str)  # 后台线程完成热点操作后发送的信号（成功标志，消息）
+    """热点管理页面 — 监控 8021x 进程、移动/恢复文件、管理移动热点。"""
+    _signal = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
         self._signal.connect(self._on_operation_finished)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
 
         # ---- 8021x 进程状态区 ----
+        proc_group = QGroupBox("8021x 进程监控")
+        proc_group_layout = QVBoxLayout(proc_group)
+        proc_group_layout.setSpacing(10)
+
         self.proc_status_label = QLabel()
         self.proc_status_label.setAlignment(Qt.AlignCenter)
-        self.proc_status_label.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
-        self.proc_status_label.setMinimumHeight(60)
-        self.proc_status_label.setFrameStyle(QFrame.Box)
-        layout.addWidget(self.proc_status_label)
+        self.proc_status_label.setFont(QFont("Consolas", 16, QFont.Bold))
+        self.proc_status_label.setMinimumHeight(48)
+        self.proc_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #0d1117;
+                border: 1px solid #21262d;
+                border-radius: 8px;
+                padding: 8px;
+            }
+        """)
+        proc_group_layout.addWidget(self.proc_status_label)
 
-        self.proc_path_label = QLabel("无")
-        self.proc_path_label.setFont(QFont("Microsoft YaHei", 12))
-        self.proc_path_label.setMinimumHeight(40)
-        self.proc_path_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.proc_path_label = QLabel("未检测到进程")
+        self.proc_path_label.setFont(QFont("Consolas", 10))
+        self.proc_path_label.setMinimumHeight(32)
         self.proc_path_label.setWordWrap(True)
-        layout.addWidget(self.proc_path_label)
+        self.proc_path_label.setStyleSheet("""
+            QLabel {
+                background-color: #0d1117;
+                border: 1px solid #21262d;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #8b949e;
+            }
+        """)
+        proc_group_layout.addWidget(self.proc_path_label)
 
-        # ---- 进程操作按钮 ----
-        btn_font = QFont("Microsoft YaHei", 11)
-        row1 = QHBoxLayout()
-        self.btn_kill_move = QPushButton("⏹️ 结束并移动")
-        self.btn_restore = QPushButton("↩️ 还原")
-        for btn in (self.btn_kill_move, self.btn_restore):
-            btn.setFont(btn_font)
-            btn.setMinimumHeight(35)
+        # 进程操作按钮行
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self.btn_kill_move = QPushButton("⏹ 结束并移动")
+        self.btn_restore = QPushButton("↩ 还原")
+        self.btn_refresh = QPushButton("🔄 刷新")
+        for btn in (self.btn_kill_move, self.btn_restore, self.btn_refresh):
+            btn.setMinimumHeight(34)
+            btn.setCursor(Qt.PointingHandCursor)
+        self.btn_kill_move.setStyleSheet("QPushButton { background-color: #5c1624; border-color: #7a1d32; } QPushButton:hover { background-color: #7a1d32; border-color: #ff4757; }")
+        self.btn_restore.setStyleSheet("QPushButton { background-color: #1a3a2a; border-color: #1f4d34; } QPushButton:hover { background-color: #1f4d34; border-color: #00d4aa; }")
+        self.btn_refresh.setStyleSheet("QPushButton { background-color: #1f2a37; } QPushButton:hover { background-color: #263850; border-color: #58a6ff; }")
+
         self.btn_kill_move.clicked.connect(self.kill_and_move)
         self.btn_restore.clicked.connect(self.restore)
-        row1.addWidget(self.btn_kill_move)
-        row1.addWidget(self.btn_restore)
-
-        row2 = QHBoxLayout()
-        self.btn_refresh = QPushButton("🔄 刷新")
-        self.btn_refresh.setFont(btn_font)
-        self.btn_refresh.setMinimumHeight(35)
         self.btn_refresh.clicked.connect(self.refresh)
-        row2.addWidget(self.btn_refresh)
+        btn_row.addWidget(self.btn_kill_move)
+        btn_row.addWidget(self.btn_restore)
+        btn_row.addWidget(self.btn_refresh)
+        btn_row.addStretch()
+        proc_group_layout.addLayout(btn_row)
 
-        btn_container = QVBoxLayout()
-        btn_container.addLayout(row1)
-        btn_container.addLayout(row2)
-        layout.addLayout(btn_container)
-
-        # ---- 目标文件夹设置 ----
-        target_layout = QHBoxLayout()
-        target_layout.addWidget(QLabel("临时存放文件夹:"))
+        # 目标文件夹
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        target_row.addWidget(QLabel("存放目录:"))
         self.target_edit = QLineEdit()
-        self.target_edit.setPlaceholderText("D:/temp_folder")
-        target_layout.addWidget(self.target_edit, 1)
-        browse_btn = QPushButton("📁 浏览...")
+        self.target_edit.setPlaceholderText("选择移动目标文件夹...")
+        target_row.addWidget(self.target_edit, 1)
+        browse_btn = QPushButton("📁 浏览")
+        browse_btn.setCursor(Qt.PointingHandCursor)
+        browse_btn.setStyleSheet("QPushButton { background-color: #0d2b3d; } QPushButton:hover { background-color: #163d54; border-color: #58a6ff; }")
         browse_btn.clicked.connect(self.browse_target_folder)
-        target_layout.addWidget(browse_btn)
-        layout.addLayout(target_layout)
+        target_row.addWidget(browse_btn)
+        proc_group_layout.addLayout(target_row)
 
-        # 分割线
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(line)
+        layout.addWidget(proc_group)
 
         # ---- 热点管理分组 ----
-        group = QGroupBox("🌐 热点管理")
-        group_layout = QHBoxLayout(group)
+        group = QGroupBox("移动热点")
+        group_layout = QVBoxLayout(group)
+        group_layout.setSpacing(14)
 
-        # 左侧：热点配置表单
-        left_form = QVBoxLayout()
-        left_form.setSpacing(8)
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("热点名称:"))
+        # 配置表单区
+        form_layout = QVBoxLayout()
+        form_layout.setSpacing(10)
+
+        # SSID + 密码 同行
+        creds_row = QHBoxLayout()
+        creds_row.setSpacing(12)
+        ssid_col = QVBoxLayout()
+        ssid_col.addWidget(QLabel("热点名称"))
         self.ssid_edit = QLineEdit()
-        self.ssid_edit.setPlaceholderText("输入热点名称")
-        name_layout.addWidget(self.ssid_edit)
-        left_form.addLayout(name_layout)
-        pass_layout = QHBoxLayout()
-        pass_layout.addWidget(QLabel("密码:"))
+        self.ssid_edit.setPlaceholderText("热点名称（SSID）")
+        ssid_col.addWidget(self.ssid_edit)
+        creds_row.addLayout(ssid_col, 2)
+
+        pwd_col = QVBoxLayout()
+        pwd_col.addWidget(QLabel("密码"))
+        pwd_row = QHBoxLayout()
+        pwd_row.setSpacing(4)
         self.password_edit = QLineEdit()
-        self.password_edit.setPlaceholderText("至少8位")
-        self.password_edit.setEchoMode(QLineEdit.Password)  # 默认密码模式
-        pass_layout.addWidget(self.password_edit)
-        self.toggle_pwd_btn = QPushButton("👁️")
-        self.toggle_pwd_btn.setFixedWidth(35)
+        self.password_edit.setPlaceholderText("至少 8 位")
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        pwd_row.addWidget(self.password_edit, 1)
+        self.toggle_pwd_btn = QPushButton("👁")
+        self.toggle_pwd_btn.setFixedWidth(36)
+        self.toggle_pwd_btn.setFixedHeight(36)
+        self.toggle_pwd_btn.setCursor(Qt.PointingHandCursor)
         self.toggle_pwd_btn.clicked.connect(self.toggle_password_visibility)
-        pass_layout.addWidget(self.toggle_pwd_btn)
-        left_form.addLayout(pass_layout)
-        band_layout = QHBoxLayout()
-        band_layout.addWidget(QLabel("频段:"))
+        pwd_row.addWidget(self.toggle_pwd_btn)
+        pwd_col.addLayout(pwd_row)
+        creds_row.addLayout(pwd_col, 2)
+        form_layout.addLayout(creds_row)
+
+        # 频段 + 保存按钮 同行
+        band_row = QHBoxLayout()
+        band_row.setSpacing(12)
+        band_col = QVBoxLayout()
+        band_col.addWidget(QLabel("频段"))
         self.band_combo = QComboBox()
         self.band_combo.addItems(["2.4GHz", "5GHz"])
-        band_layout.addWidget(self.band_combo)
-        band_layout.addStretch()
-        left_form.addLayout(band_layout)
+        band_col.addWidget(self.band_combo)
+        band_row.addLayout(band_col, 1)
 
-        # 二维码显示区域
-        self.qr_label = QLabel()
-        self.qr_label.setFixedSize(150, 150)
-        self.qr_label.setAlignment(Qt.AlignCenter)
-        self.qr_label.setVisible(False)
-        left_form.addWidget(self.qr_label, 0, Qt.AlignCenter)
-        group_layout.addLayout(left_form, 1)
-
-        # 右侧：操作按钮和状态
-        right_ops = QVBoxLayout()
-        right_ops.setSpacing(12)
-        right_ops.setAlignment(Qt.AlignCenter)
-        self.save_config_btn = QPushButton("💾 保存配置")
+        self.save_config_btn = QPushButton("💾 保存并应用")
+        self.save_config_btn.setMinimumHeight(40)
+        self.save_config_btn.setCursor(Qt.PointingHandCursor)
+        self.save_config_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1f4d34;
+                border: 1px solid #238636;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #238636;
+                border-color: #00d4aa;
+            }
+        """)
         self.save_config_btn.clicked.connect(self.save_hotspot_config)
-        self.save_config_btn.setMinimumHeight(36)
-        right_ops.addWidget(self.save_config_btn)
+        band_col2 = QVBoxLayout()
+        band_col2.addWidget(QLabel(""))  # 占位对齐
+        band_col2.addWidget(self.save_config_btn)
+        band_row.addLayout(band_col2, 1)
+        form_layout.addLayout(band_row)
 
-        self.hotspot_switch = SwitchButton()
-        self.hotspot_switch.clicked.connect(self.toggle_hotspot)
+        group_layout.addLayout(form_layout)
+
+        # 分割区：开关 + 状态 + 二维码
+        control_row = QHBoxLayout()
+        control_row.setSpacing(20)
+
+        # 左侧：开关 + 状态
+        switch_area = QVBoxLayout()
+        switch_area.setAlignment(Qt.AlignCenter)
+        switch_area.setSpacing(8)
         switch_wrap = QHBoxLayout()
         switch_wrap.addStretch()
+        self.hotspot_switch = SwitchButton()
         switch_wrap.addWidget(self.hotspot_switch)
         switch_wrap.addStretch()
-        right_ops.addLayout(switch_wrap)
+        switch_area.addLayout(switch_wrap)
 
         self.hotspot_status_text = QLabel("未启动")
         self.hotspot_status_text.setAlignment(Qt.AlignCenter)
-        self.hotspot_status_text.setFont(QFont("Microsoft YaHei", 10))
-        right_ops.addWidget(self.hotspot_status_text)
-        group_layout.addLayout(right_ops)
+        self.hotspot_status_text.setFont(QFont("Consolas", 11))
+        self.hotspot_status_text.setStyleSheet("color: #8b949e; background-color: transparent;")
+        switch_area.addWidget(self.hotspot_status_text)
 
+        self.hotspot_switch.clicked.connect(self.toggle_hotspot)
+        control_row.addLayout(switch_area)
+
+        # 右侧：二维码
+        self.qr_label = QLabel()
+        self.qr_label.setFixedSize(130, 130)
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setVisible(False)
+        self.qr_label.setStyleSheet("""
+            QLabel {
+                background-color: #ffffff;
+                border: 2px solid #30363d;
+                border-radius: 8px;
+                padding: 4px;
+            }
+        """)
+        control_row.addWidget(self.qr_label, 0, Qt.AlignCenter)
+
+        group_layout.addLayout(control_row)
         layout.addWidget(group)
         layout.addStretch()
 
-        # ---- 定时器：实时更新进程状态 ----
+        # ---- 定时器 ----
         self.proc_timer = QTimer(self)
         self.proc_timer.timeout.connect(self._refresh_proc)
-        self.proc_timer.start(1000) # 每秒检查一次
+        self.proc_timer.start(1000)
 
-        # ---- 定时器：定期刷新热点状态 ----
         self.hotspot_timer = QTimer(self)
         self.hotspot_timer.timeout.connect(self._refresh_hotspot_status)
-        self.hotspot_timer.start(3000)  # 每3秒检查一次
+        self.hotspot_timer.start(3000)
 
-        # ---- 动画定时器：切换热点时的“正在切换...”动画 ----
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._animate_switching)
         self._anim_dots = 0
 
-        # 初始化：加载配置，刷新UI
+        self._restarting = False  # 标记是否正在执行配置保存后重启
+
         self.load_all_config()
         self._delayed_hotspot_refresh()
 
@@ -387,7 +731,7 @@ class HotspotPage(QWidget):
             self.toggle_pwd_btn.setText("🙈")
         else:
             self.password_edit.setEchoMode(QLineEdit.Password)
-            self.toggle_pwd_btn.setText("👁️")
+            self.toggle_pwd_btn.setText("👁")
 
     def load_all_config(self):
         """加载所有配置项并填充界面控件。"""
@@ -420,7 +764,7 @@ class HotspotPage(QWidget):
             self.btn_restore.setEnabled(False)
 
     def save_hotspot_config(self):
-        """保存热点配置（SSID、密码、频段）到文件。"""
+        """保存热点配置（SSID、密码、频段）到文件，若热点正在运行则自动重启以应用新配置。"""
         ssid = self.ssid_edit.text().strip()
         password = self.password_edit.text().strip()
         band = self.band_combo.currentText()
@@ -431,20 +775,53 @@ class HotspotPage(QWidget):
             QMessageBox.warning(self, "错误", "密码长度不能少于8位")
             return
         HotspotManager.save_config({"ssid": ssid, "password": password, "band": band})
-        QMessageBox.information(self, "提示", "配置已保存")
+
+        # 如果热点当前正在运行，停止后重新启动以应用新配置
+        current_status = HotspotManager.get_hotspot_status()
+        if current_status == "已启动":
+            self.save_config_btn.setEnabled(False)
+            self.hotspot_switch.setEnabled(False)
+            self._restarting = True
+            self.hotspot_status_text.setText("正在应用新配置...")
+            self.hotspot_status_text.setStyleSheet("color: #f0a500;")
+            threading.Thread(
+                target=self._restart_hotspot_with_new_config,
+                args=(ssid, password, band),
+                daemon=True
+            ).start()
+        else:
+            QMessageBox.information(self, "提示", "配置已保存")
+            self.generate_qr_code()
+
+    def _restart_hotspot_with_new_config(self, ssid, password, band):
+        """后台线程：停止当前热点，然后用新配置重新启动。"""
+        # 先停止热点
+        stop_ok, stop_msg = HotspotManager.stop_hotspot()
+        if not stop_ok:
+            self._signal.emit(False, f"停止失败: {stop_msg}")
+            return
+        # 用新配置启动（直接传参，无需再读文件）
+        start_ok, start_msg = HotspotManager.start_hotspot(
+            ssid=ssid, key=password, band=band
+        )
+        self._signal.emit(start_ok, start_msg if not start_ok else "")
 
     def _refresh_proc(self):
         """定时刷新 8021x.exe 进程状态和路径显示。"""
         running = SupplicantManager.is_running()
         if running:
-            self.proc_status_label.setText("8021x.exe 运行中")
-            self.proc_status_label.setStyleSheet("color: white; background-color: #dc3545;")
+            self.proc_status_label.setText("● 8021x.exe 运行中")
+            self.proc_status_label.setStyleSheet(
+                "QLabel { color: #ff7b72; background-color: #1a1015; border: 1px solid #3d1f28; border-radius: 8px; padding: 8px; }"
+            )
             path = SupplicantManager.get_exe_path()
             self.proc_path_label.setText(path if path else "无法获取路径")
         else:
-            self.proc_status_label.setText("8021x.exe 未运行")
-            self.proc_status_label.setStyleSheet("color: white; background-color: #28a745;")
-            self.proc_path_label.setText("无")
+            self.proc_status_label.setText("● 8021x.exe 未运行")
+            self.proc_status_label.setStyleSheet(
+                "QLabel { color: #7ee787; background-color: #0d1b14; border: 1px solid #1a3a2a; border-radius: 8px; padding: 8px; }"
+            )
+            self.proc_path_label.setText("未检测到进程")
 
     def _delayed_hotspot_refresh(self):
         """延迟200毫秒刷新热点状态（避免界面初始化阻塞）。"""
@@ -455,8 +832,8 @@ class HotspotPage(QWidget):
         try:
             status = HotspotManager.get_hotspot_status()
             self.hotspot_status_text.setText(status)
-            self.hotspot_status_text.setStyleSheet("")
-            self.hotspot_switch.blockSignals(True)  # 避免触发 toggle 信号
+            self.hotspot_status_text.setStyleSheet("color: #8b949e; background-color: transparent;")
+            self.hotspot_switch.blockSignals(True)
             self.hotspot_switch.setChecked(status == "已启动")
             self.hotspot_switch.blockSignals(False)
             if status == "已启动":
@@ -468,19 +845,19 @@ class HotspotPage(QWidget):
 
     def toggle_hotspot(self):
         """用户点击开关按钮，启动/停止热点（在后台线程中执行）。"""
-        self.hotspot_switch.setEnabled(False)   # 操作期间禁用开关
+        self.hotspot_switch.setEnabled(False)
         self._anim_dots = 0
         self._anim_timer.start(400)
-        self.hotspot_status_text.setText("正在切换.")   # 启动“正在切换...”动画
-        self.hotspot_status_text.setStyleSheet("color: blue;")
+        self.hotspot_status_text.setText("正在切换")
+        self.hotspot_status_text.setStyleSheet("color: #d2991d; background-color: transparent;")
         start = self.hotspot_switch.isChecked()
         threading.Thread(target=self._execute_toggle, args=(start,), daemon=True).start()
 
     def _animate_switching(self):
-        """“正在切换...”文字动画（增加点数）。"""
+        """切换动画：旋转纹理效果。"""
+        frames = ["◐", "◓", "◑", "◒"]
         self._anim_dots = (self._anim_dots + 1) % 4
-        dots = "." * self._anim_dots
-        self.hotspot_status_text.setText(f"正在切换{dots}")
+        self.hotspot_status_text.setText(f"正在切换 {frames[self._anim_dots]}")
 
     def _execute_toggle(self, start):
         """后台线程实际执行热点开关操作，并通过信号通知 UI。"""
@@ -494,12 +871,17 @@ class HotspotPage(QWidget):
         """热点操作完成后的 UI 更新槽函数。"""
         self._anim_timer.stop()
         self.hotspot_switch.setEnabled(True)
+        self.save_config_btn.setEnabled(True)
+        was_restarting = self._restarting
+        self._restarting = False
         if ok:
             self._refresh_hotspot_status()
+            if was_restarting:
+                QMessageBox.information(self, "提示", "配置已保存并应用")
         else:
-            self.hotspot_status_text.setText(f"❌ {msg}")
-            self.hotspot_status_text.setStyleSheet("color: red;")
-            QTimer.singleShot(3000, self._refresh_hotspot_status)   # 3秒后恢复状态显示
+            self.hotspot_status_text.setText(f"✕ {msg}")
+            self.hotspot_status_text.setStyleSheet("color: #ff7b72; background-color: transparent;")
+            QTimer.singleShot(3000, self._refresh_hotspot_status)
 
     def refresh(self):
         """刷新整个页面：进程状态、热点状态、移动按钮状态。"""

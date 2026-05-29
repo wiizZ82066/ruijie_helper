@@ -104,12 +104,13 @@ Write-Output $mgr.TetheringOperationalState
         return mapping.get(raw, f"Unknown({raw})")
 
     @staticmethod
-    def _send_command_and_wait(operation: str, ssid=None, key=None, timeout=15) -> tuple[bool, str]:
+    def _send_command_and_wait(operation: str, ssid=None, key=None, band=None, timeout=15) -> tuple[bool, str]:
         """内部方法：发送启动/停止命令，并轮询等待状态变为预期值。
         参数：
             operation: "start" 或 "stop"
             ssid: 热点名称（仅启动时需要）
             key: 热点密码（仅启动时需要）
+            band: 频段值（0=自动, 1=2.4GHz, 2=5GHz，仅启动时需要）
             timeout: 最大等待时间（秒）
         返回：
             (成功标志, 错误信息字符串)
@@ -117,6 +118,16 @@ Write-Output $mgr.TetheringOperationalState
 
         if operation == "start":
             expected_status = "已启动"
+            # 频段映射：将字符串频段转为 Windows API 数值
+            band_value = 0  # 默认自动
+            if isinstance(band, str):
+                if "5" in band:
+                    band_value = 2
+                elif "2.4" in band:
+                    band_value = 1
+            elif isinstance(band, (int, float)):
+                band_value = int(band)
+
             script = f'''$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $null = Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -124,13 +135,12 @@ $cp = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Con
 if ($null -eq $cp) {{ Write-Output "FAIL:无网络连接"; exit 1 }}
 $mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($cp)
 if ($null -eq $mgr) {{ Write-Output "FAIL:无法获取管理器"; exit 1 }}
+$config = $mgr.GetCurrentAccessPointConfiguration()
+$config.Ssid = "{ssid}"
+$config.Passphrase = "{key}"
+$config.Band = {band_value}
 try {{
-    $config = $mgr.GetCurrentAccessPointConfiguration()
-    if ($config.Ssid -ne "{ssid}" -or $config.Passphrase -ne "{key}") {{
-        $config.Ssid = "{ssid}"
-        $config.Passphrase = "{key}"
-        $configAsync = $mgr.ConfigureAccessPointAsync($config)
-    }}
+    $configAsync = $mgr.ConfigureAccessPointAsync($config)
 }} catch {{}}
 try {{
     $null = $mgr.StartTetheringAsync()
@@ -176,22 +186,24 @@ try {
         return False, f"{'启动' if operation=='start' else '关闭'}超时，请检查系统热点设置"
 
     @staticmethod
-    def start_hotspot(ssid: str = None, key: str = None) -> tuple[bool, str]:
+    def start_hotspot(ssid: str = None, key: str = None, band: str = None) -> tuple[bool, str]:
         """启动移动热点。
         参数：
             ssid: 热点名称，若为 None 则从配置文件读取。
             key: 热点密码，若为 None 则从配置文件读取。
+            band: 频段，若为 None 则从配置文件读取 ("2.4GHz" / "5GHz")。
         返回：
             (是否成功, 错误信息)
         """
 
-        if ssid is None or key is None:
+        if ssid is None or key is None or band is None:
             config = HotspotManager.load_config()
             ssid = config.get("ssid")
             key = config.get("password")
+            band = config.get("band", "2.4GHz")
         if HotspotManager.get_hotspot_status() == "已启动":
             return True, ""
-        return HotspotManager._send_command_and_wait("start", ssid, key, timeout=15)
+        return HotspotManager._send_command_and_wait("start", ssid, key, band, timeout=15)
 
     @staticmethod
     def stop_hotspot() -> tuple[bool, str]:

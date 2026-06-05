@@ -1,4 +1,4 @@
-import type { Adapter, ProcessStatus, HotspotConfig, HotspotStatus, ApiResponse } from './types';
+import type { Adapter, ProcessStatus, HotspotConfig, HotspotStatus, NetworkAccessMode, InternetAdapter, ConnectedDevicesInfo, ApiResponse } from './types';
 
 function getApi() {
   if (typeof window !== 'undefined' && window.api) {
@@ -77,10 +77,38 @@ export async function fetchHotspotStatus(): Promise<HotspotStatus> {
     : { status: 'Unknown', running: false };
 }
 
-export async function toggleHotspot(start: boolean): Promise<boolean> {
-  const endpoint = start ? '/api/hotspot/start' : '/api/hotspot/stop';
-  const res = await apiCall<{ success: boolean }>('POST', endpoint);
-  return res.ok;
+export async function toggleHotspot(start: boolean, mode?: string, internetAdapter?: string): Promise<{ ok: boolean; message?: string }> {
+  if (start) {
+    let endpoint = '/api/hotspot/start';
+    const params: string[] = [];
+    if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
+    if (internetAdapter) params.push(`internet_adapter=${encodeURIComponent(internetAdapter)}`);
+    if (params.length > 0) endpoint += '?' + params.join('&');
+    const res = await apiCall<{ success: boolean; message: string }>('POST', endpoint);
+    return { ok: res.ok, message: res.data?.message };
+  } else {
+    const res = await apiCall<{ success: boolean }>('POST', '/api/hotspot/stop');
+    return { ok: res.ok };
+  }
+}
+
+// ── Network Access Modes ───────────────────────────
+
+export async function fetchNetworkAccessModes(): Promise<NetworkAccessMode[]> {
+  const res = await apiCall<{ modes: NetworkAccessMode[] }>('GET', '/api/hotspot/modes');
+  return res.ok && res.data ? res.data.modes : [];
+}
+
+export async function fetchInternetAdapters(): Promise<InternetAdapter[]> {
+  const res = await apiCall<{ adapters: InternetAdapter[] }>('GET', '/api/network/internet-adapters');
+  return res.ok && res.data ? res.data.adapters : [];
+}
+
+export async function fetchConnectedDevices(): Promise<ConnectedDevicesInfo> {
+  const res = await apiCall<ConnectedDevicesInfo>('GET', '/api/hotspot/connected-devices');
+  return res.ok && res.data
+    ? res.data
+    : { count: 0, devices: [], hotspot_running: false };
 }
 
 // ── Config ──────────────────────────────────────────
@@ -89,18 +117,20 @@ export async function fetchHotspotConfig(): Promise<HotspotConfig> {
   const res = await apiCall<HotspotConfig>('GET', '/api/config/hotspot');
   return res.ok && res.data
     ? res.data
-    : { ssid: '', password: '', band: '2.4GHz', target_folder: '' };
+    : { ssid: '', password: '', band: '2.4GHz', network_access: 'nat', internet_adapter: 'automatic', target_folder: '' };
 }
 
 export async function saveHotspotConfig(
   ssid: string,
   password: string,
-  band: string
+  band: string,
+  networkAccess?: string,
+  internetAdapter?: string
 ): Promise<{ ok: boolean; restarted: boolean }> {
   const res = await apiCall<{ success: boolean; restarted: boolean }>(
     'PUT',
     '/api/config/hotspot',
-    { ssid, password, band }
+    { ssid, password, band, network_access: networkAccess, internet_adapter: internetAdapter }
   );
   return { ok: res.ok, restarted: res.ok && res.data ? res.data.restarted : false };
 }

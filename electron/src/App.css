@@ -641,6 +641,179 @@ table.nic-table .col-control { width: 80px; text-align: center; }
   border: 1px solid #7a1d32;
 }
 
+/* ── Mode Selector ───────────────────────────────────── */
+
+.mode-selector, .adapter-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mode-option {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg-secondary);
+}
+
+.mode-option:hover {
+  border-color: var(--accent-dim);
+  background: var(--bg-tertiary);
+}
+
+.mode-option.selected {
+  border-color: var(--accent);
+  background: rgba(0, 212, 170, 0.08);
+}
+
+.mode-option.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mode-option input[type="radio"] {
+  display: none;
+}
+
+.mode-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.mode-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── Hotspot Control Row ─────────────────────────────── */
+
+.hotspot-control-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.hotspot-control-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 160px;
+}
+
+.hotspot-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  flex: 1;
+  min-width: 200px;
+}
+
+.hotspot-info-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.info-label {
+  color: var(--text-muted);
+  min-width: 44px;
+}
+
+.info-value {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* ── Connected Devices ───────────────────────────────── */
+
+.devices-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.devices-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.devices-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.devices-count {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+  background: rgba(0, 212, 170, 0.1);
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+
+.devices-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.device-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.device-icon {
+  font-size: 16px;
+}
+
+.device-mac {
+  color: var(--text-primary);
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 11px;
+}
+
+.device-ip {
+  color: var(--text-muted);
+  font-family: monospace;
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.devices-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 16px;
+}
+
+/* ── Small Button ────────────────────────────────────── */
+
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+
 /* ── Animations ──────────────────────────────────────── */
 
 @keyframes fadeInUp {

@@ -23,42 +23,35 @@ function isAdmin() {
 
 function startPythonBackend() {
   const isDev = !app.isPackaged;
-  const pythonExe = 'python';
   let scriptPath;
   let cwd;
-  let reqPath;
 
   if (isDev) {
+    // 开发模式：直接跑 Python
     cwd = path.join(__dirname, '..');
     scriptPath = path.join(cwd, 'backend', 'server.py');
-    reqPath = path.join(cwd, 'requirements.txt');
-  } else {
-    cwd = process.resourcesPath;
-    scriptPath = path.join(cwd, 'backend', 'server.py');
-    reqPath = path.join(cwd, 'requirements.txt');
-  }
+    const pythonExe = 'python';
 
-  // 确保 Python 依赖已安装
-  const installCmd = `"${pythonExe}" -m pip install -r "${reqPath}" --quiet 2>&1`;
-  console.log('[Main] Checking Python dependencies...');
-  try {
-    const result = require('child_process').execSync(installCmd, {
+    console.log(`[Main] 开发模式: ${pythonExe} ${scriptPath}`);
+
+    pythonProcess = spawn(pythonExe, [scriptPath], {
       cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      timeout: 60000,
     });
-    console.log('[Main] Python dependencies OK');
-  } catch (e) {
-    console.error('[Main] pip install warning:', e.message);
+  } else {
+    // 打包模式：使用预编译的 backend.exe（由 Nuitka 构建时编译）
+    cwd = process.resourcesPath;
+    scriptPath = path.join(cwd, 'backend.exe');
+
+    console.log(`[Main] 启动预编译后端: ${scriptPath}`);
+
+    pythonProcess = spawn(scriptPath, [], {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
   }
-
-  console.log(`[Main] Starting Python backend: ${pythonExe} ${scriptPath}`);
-
-  pythonProcess = spawn(pythonExe, [scriptPath], {
-    cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
 
   pythonProcess.stdout.on('data', (data) => {
     console.log(`[Python] ${data.toString().trim()}`);
@@ -69,19 +62,19 @@ function startPythonBackend() {
   });
 
   pythonProcess.on('close', (code) => {
-    console.log(`[Python] Process exited with code ${code}`);
+    console.log(`[Python] 进程退出, code=${code}`);
     pythonProcess = null;
   });
 
   pythonProcess.on('error', (err) => {
-    console.error(`[Python] Failed to start: ${err.message}`);
+    console.error(`[Python] 启动失败: ${err.message}`);
     pythonProcess = null;
   });
 }
 
-// ── 等待 API 就绪 ───────────────────────────────────────
+// ── 等待 API 就绪（快速检测）───────────────────────────
 
-function waitForAPI(retries = 30, delay = 500) {
+function waitForAPI(retries = 30, delay = 200) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       http.get(`${API_BASE}/api/health`, (res) => {
@@ -90,13 +83,13 @@ function waitForAPI(retries = 30, delay = 500) {
         } else if (remaining > 0) {
           setTimeout(() => check(remaining - 1), delay);
         } else {
-          reject(new Error('API timeout'));
+          reject(new Error('API 超时'));
         }
       }).on('error', () => {
         if (remaining > 0) {
           setTimeout(() => check(remaining - 1), delay);
         } else {
-          reject(new Error('API not reachable'));
+          reject(new Error('API 无法连接'));
         }
       });
     };
@@ -118,6 +111,7 @@ function createWindow() {
     title: '校园网认证助手',
     icon: path.join(__dirname, 'app.ico'),
     frame: true,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -125,7 +119,6 @@ function createWindow() {
     },
   });
 
-  // 去掉菜单栏
   mainWindow.setMenuBarVisibility(false);
 
   if (isDev) {
@@ -134,6 +127,11 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
+
+  // 等页面加载完成后才显示窗口，减少白屏感
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -176,14 +174,15 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // 启动后端（无 pip install，打包后直接启动预编译 exe）
   startPythonBackend();
 
   try {
     await waitForAPI();
-    console.log('[Main] Python API is ready');
+    console.log('[Main] 后端 API 就绪');
   } catch (err) {
-    console.error('[Main] Failed to connect to Python API:', err.message);
-    dialog.showErrorBox('启动失败', '无法连接到后端服务，请检查 Python 环境。');
+    console.error('[Main] 后端连接失败:', err.message);
+    dialog.showErrorBox('启动失败', '无法连接到后端服务，请确认以管理员权限运行。');
   }
 
   createWindow();

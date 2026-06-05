@@ -1,5 +1,5 @@
 """
-校园网认证助手 — FastAPI 后端服务
+校园网认证助手 V5 — FastAPI 后端服务
 提供 REST API 供 Electron 前端调用，封装所有 Windows 系统操作。
 端口: 18921
 """
@@ -20,8 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.network_adapter import NetworkAdapterManager
 from utils.supplicant import SupplicantManager, SupplicantConfig
 from utils.hotspot import HotspotManager
+from utils.ics_manager import ICSManager
 
-app = FastAPI(title="CampusAuth API", version="3.0")
+app = FastAPI(title="CampusAuth API", version="5.0")
 
 # 允许 Electron 跨域访问
 app.add_middleware(
@@ -48,7 +49,7 @@ class TargetFolderModel(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "3.0"}
+    return {"status": "ok", "version": "5.0"}
 
 
 # ─── 网卡管理 ────────────────────────────────────────────
@@ -129,6 +130,21 @@ def get_move_record():
 
 
 # ─── 热点管理 ────────────────────────────────────────────
+
+@app.get("/api/hotspot/ics-status")
+def hotspot_ics_status():
+    """获取 ICS 共享配置状态。"""
+    return ICSManager.get_ics_status()
+
+
+@app.post("/api/hotspot/repair-ics")
+def hotspot_repair_ics():
+    """一键修复 ICS 共享配置。"""
+    ok, msg = ICSManager.repair_ics()
+    if not ok:
+        raise HTTPException(500, msg or "ICS 修复失败")
+    return {"success": True, "message": msg}
+
 
 @app.get("/api/hotspot/status")
 def hotspot_status():

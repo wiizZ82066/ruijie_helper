@@ -1,7 +1,24 @@
-# 校园网认证助手
+# 校园网认证助手 V5
 
-基于 **Electron + React + FastAPI** 的 Windows 网络管理工具，集成网卡控制、802.1x 进程管理、移动热点（WiFi Direct）及 WiFi 二维码分享功能。  
+基于 **Electron + React + FastAPI** 的 Windows 网络管理工具，集成网卡控制、802.1x 进程管理、移动热点及 WiFi 二维码分享功能。  
 本软件仅用以解决`锐捷认证客户端`对有线认证用户的**虚拟机网卡检测**和**多IP限制**。
+
+## V5 重大更新
+
+### 🔥 热点方案重构 —— 参考 MyPublicWiFi
+- **三层降级策略**：`hostednetwork + ICS`（主力）→ `TetheringManager`（备选）→ `hostednetwork only`（最终备选）
+- **手动配置 ICS**：通过 `HNetCfg.HNetShare` COM 接口强制配置 Internet Connection Sharing，彻底解决手机连接热点后**无网络**的问题
+- 不再依赖系统自动共享，连接即有网
+
+### ⚡ 启动速度大幅提升
+- **后端预编译**：构建时用 Nuitka 将 Python 后端编译为独立 exe，**无需 Python 环境、无需 pip install**
+- **NSIS 安装器**：告别 portable 模式的解压等待，安装即用、秒速启动
+- 首次启动时间从 **15s+ 降至 ~3s**
+
+### 📦 打包优化
+- 安装包更小、更快
+- 支持自定义安装目录
+- 自动创建桌面快捷方式
 
 ## 技术架构
 
@@ -16,22 +33,25 @@
 │  ┌──────────▼────────────────────────┐  │
 │  │  main.cjs (Node.js 主进程)         │  │
 │  │  · 管理员权限检测 & 自动提权        │  │
-│  │  · 启动 Python 后端 / 依赖安装     │  │
+│  │  · 启动预编译后端 (backend.exe)     │  │
 │  │  · HTTP 请求转发 (127.0.0.1:18921) │  │
 │  └──────────┬────────────────────────┘  │
 └─────────────┼───────────────────────────┘
               │ HTTP
 ┌─────────────▼───────────────────────────┐
-│  FastAPI 后端 (Python)                   │
+│  FastAPI 后端 (预编译 backend.exe)       │
 │  · /api/adapters    网卡管理             │
 │  · /api/process     8021x 进程控制       │
-│  · /api/hotspot     热点开关/状态        │
+│  · /api/hotspot     热点开关/状态/ICS    │
 │  · /api/config      配置读写             │
 │  · /api/qrcode      WiFi 二维码          │
 └─────────────┬───────────────────────────┘
-              │ PowerShell / netsh / WinRT
+              │ PowerShell / netsh / WinRT / HNetCfg
 ┌─────────────▼───────────────────────────┐
 │  Windows 系统 API                        │
+│  · netsh wlan hostednetwork (MyPublicWiFi)│
+│  · HNetCfg.HNetShare COM (ICS 手动配置)  │
+│  · Windows.Networking (TetheringManager) │
 └─────────────────────────────────────────┘
 ```
 
@@ -42,14 +62,15 @@ ruijie_helper/
 ├── backend/
 │   └── server.py              # FastAPI 后端入口
 ├── utils/
-│   ├── hotspot.py             # 热点管理（WinRT API）
+│   ├── hotspot.py             # 热点管理（三层降级，参考 MyPublicWiFi）
+│   ├── ics_manager.py         # ICS 配置管理（HNetCfg COM）✨ 新增
 │   ├── supplicant.py          # 8021x 进程管理 + 配置
 │   └── network_adapter.py     # 网卡管理（netsh）
 ├── electron/
 │   ├── package.json           # Electron 项目配置
-│   ├── main.cjs               # Electron 主进程
+│   ├── main.cjs               # Electron 主进程（无 pip install）
 │   ├── preload.cjs            # IPC 桥接
-│   ├── build.bat              # 一键打包脚本
+│   ├── build.bat              # 一键打包脚本（含 Nuitka 编译）
 │   └── src/                   # React 前端
 │       ├── App.tsx / App.css  # 主应用 + 全局样式
 │       ├── api.ts             # API 客户端
@@ -78,13 +99,13 @@ ruijie_helper/
   - 结束进程并将可执行文件移动到指定目录；支持还原至原始路径。
   - 仅保留最近一次移动记录，防止误操作。
 
-- **热点管理（WiFi Direct）**
-  - 通过 Windows 原生接口（PowerShell 调用 WinRT API）开启/关闭移动热点。
-  - 自定义热点名称（SSID）、密码、频段（2.4 GHz / 5 GHz），配置自动持久化。
-  - **保存配置后自动重启热点**以应用新参数。
-  - **频段切换已修复**：正确设置 Windows API 的 Band 属性。
-  - 热点成功开启后自动生成 WiFi 二维码，方便手机扫码连接。
-  - 滑动开关控制，切换时显示动画状态反馈。
+- **热点管理（MyPublicWiFi 方案）**
+  - **三层降级**：`hostednetwork + ICS`(主力) → `TetheringManager`(备选) → `hostednetwork`(最终)
+  - **手动 ICS 配置**：通过 `HNetCfg.HNetShare` COM 接口自动将有线网卡共享给热点，**连接既有网**
+  - 自动检测互联网网卡，无需手动选择
+  - ICS 状态诊断与一键修复
+  - 自定义 SSID、密码、频段，配置自动持久化
+  - 热点成功开启后自动生成 WiFi 二维码，方便手机扫码连接
 
 ## 默认配置
 
@@ -100,9 +121,9 @@ ruijie_helper/
 
 ## 使用方法
 
-### 1. 直接下载运行（推荐）
+### 1. 直接下载安装（推荐）
 
-下载 `Release` 中的 [zip](https://github.com/wiizZ82066/ruijie_helper/releases/tag/V4)，解压到任意目录，双击 `校园网认证助手.exe` 即可运行。
+下载 `Release` 中的 [安装包](https://github.com/wiizZ82066/ruijie_helper/releases/tag/V5)，运行 `校园网认证助手_Setup_5.0.0.exe` 即可安装使用。
 
 ### 2. 从源码构建
 
@@ -119,7 +140,7 @@ pip install -r requirements.txt
 cd electron
 npm install
 
-# 3. 一键打包（生成 exe/win-unpacked/）
+# 3. 一键打包（生成 NSIS 安装器）
 build.bat
 ```
 
@@ -137,7 +158,8 @@ npm run dev
 ## 常见问题
 
 1. 连接上电脑热点，手机端显示**无网络**
-- 请按照`控制面板`---`网络和Interner`---`网络和共享中心`确认当前连接的网卡，进入`更改适配器设置`,修改这张网卡的`属性`---`共享`，勾选`允许其他网络用户通过此计算机的Internet连接来连接`，并在`家庭网络连接`中选择`本地连接*10`。
+- V5 已通过 `HNetCfg.HNetShare` COM 接口**自动配置 ICS**，一般无需手动操作。
+- 如果仍有问题，可尝试在「热点配置」页面点击修复 ICS，或手动检查：`控制面板` → `网络和共享中心` → `更改适配器设置` → 右键互联网网卡 → `属性` → `共享`。
 
 2. 无法启动认证客户端
 - 如果上次使用`结束并移动`且未`还原`，会导致认证客户端无法正常启动，只需要进行一次`还原`，确保`8021x.exe`成功运行即可。

@@ -28,6 +28,7 @@ desktop.ini
 
 # ── 构建产物 ───────────────────────────
 *.zip
+*.xml
 backend.exe
 *.build/
 *.dist/

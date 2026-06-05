@@ -14,12 +14,41 @@ export interface HotspotConfig {
   ssid: string;
   password: string;
   band: string;
+  network_access: string;
+  internet_adapter: string;
   target_folder: string;
 }
 
 export interface HotspotStatus {
   status: string;
   running: boolean;
+}
+
+export interface NetworkAccessMode {
+  id: string;
+  name: string;
+  available: boolean;
+}
+
+export interface InternetAdapter {
+  name: string;
+  status: string;
+  ip: string | null;
+  gateway: string | null;
+  speed: string | null;
+  hasInternet?: boolean;
+}
+
+export interface ConnectedDevice {
+  mac: string;
+  ip?: string;
+  authState: string;
+}
+
+export interface ConnectedDevicesInfo {
+  count: number;
+  devices: ConnectedDevice[];
+  hotspot_running: boolean;
 }
 
 export interface ApiResponse<T> {

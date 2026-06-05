@@ -21,6 +21,7 @@ from utils.network_adapter import NetworkAdapterManager
 from utils.supplicant import SupplicantManager, SupplicantConfig
 from utils.hotspot import HotspotManager
 from utils.ics_manager import ICSManager
+from utils.nat_manager import NATManager
 
 app = FastAPI(title="CampusAuth API", version="5.0")
 
@@ -39,6 +40,8 @@ class HotspotConfigModel(BaseModel):
     ssid: str
     password: str
     band: str
+    network_access: str = "nat"
+    internet_adapter: str = "automatic"
 
 
 class TargetFolderModel(BaseModel):
@@ -153,13 +156,38 @@ def hotspot_status():
     return {"status": status, "running": status == "已启动"}
 
 
+@app.get("/api/hotspot/connected-devices")
+def hotspot_connected_devices():
+    """获取已连接设备数量和列表。"""
+    return HotspotManager.get_connected_devices()
+
+
+@app.get("/api/hotspot/modes")
+def hotspot_modes():
+    """获取支持的网络访问模式列表。"""
+    return {"modes": HotspotManager.get_network_access_modes()}
+
+
+@app.get("/api/network/internet-adapters")
+def internet_adapters():
+    """获取有互联网连接的网卡列表（供选择）。"""
+    return {"adapters": HotspotManager.get_internet_adapters()}
+
+
 @app.post("/api/hotspot/start")
-def start_hotspot():
-    """启动热点（使用已保存的配置）。"""
-    ok, msg = HotspotManager.start_hotspot()
+def start_hotspot(mode: str = None, internet_adapter: str = None):
+    """启动热点。
+    可选参数：
+        mode: "nat" / "ics" / "bridge"
+        internet_adapter: 网卡名 / "automatic"
+    """
+    ok, msg = HotspotManager.start_hotspot(
+        network_access=mode,
+        internet_adapter=internet_adapter,
+    )
     if not ok:
         raise HTTPException(500, msg or "启动失败")
-    return {"success": True}
+    return {"success": True, "message": msg}
 
 
 @app.post("/api/hotspot/stop")
@@ -182,6 +210,8 @@ def get_hotspot_config():
         "ssid": config.get("ssid", ""),
         "password": config.get("password", ""),
         "band": config.get("band", "2.4GHz"),
+        "network_access": config.get("network_access", "nat"),
+        "internet_adapter": config.get("internet_adapter", "automatic"),
         "target_folder": target,
     }
 
@@ -197,7 +227,9 @@ def save_hotspot_config(body: HotspotConfigModel):
     HotspotManager.save_config({
         "ssid": body.ssid,
         "password": body.password,
-        "band": body.band
+        "band": body.band,
+        "network_access": body.network_access,
+        "internet_adapter": body.internet_adapter,
     })
 
     # 如果热点正在运行，重启以应用新配置

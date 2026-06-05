@@ -24,35 +24,39 @@ function isAdmin() {
 
 function startPythonBackend() {
   const isDev = !app.isPackaged;
+  const pythonExe = 'python';
   let scriptPath;
   let cwd;
 
   if (isDev) {
-    // 开发模式：直接跑 Python
     cwd = path.join(__dirname, '..');
-    scriptPath = path.join(cwd, 'backend', 'server.py');
-    const pythonExe = 'python';
-
-    console.log(`[Main] 开发模式: ${pythonExe} ${scriptPath}`);
-
-    pythonProcess = spawn(pythonExe, [scriptPath], {
-      cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
   } else {
-    // 打包模式：使用预编译的 backend.exe（由 Nuitka 构建时编译）
     cwd = process.resourcesPath;
-    scriptPath = path.join(cwd, 'backend.exe');
-
-    console.log(`[Main] 启动预编译后端: ${scriptPath}`);
-
-    pythonProcess = spawn(scriptPath, [], {
-      cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
   }
+  scriptPath = path.join(cwd, 'backend', 'server.py');
+
+  // 确保 Python 依赖已安装（首次运行可能需要）
+  const reqPath = path.join(cwd, 'requirements.txt');
+  try {
+    require('child_process').execSync(
+      `"${pythonExe}" -c "import fastapi, uvicorn, psutil, qrcode"`,
+      { stdio: 'ignore', windowsHide: true, timeout: 5000 }
+    );
+  } catch {
+    try {
+      require('child_process').execSync(
+        `"${pythonExe}" -m pip install -r "${reqPath}" --quiet`,
+        { stdio: 'ignore', windowsHide: true, timeout: 30000 }
+      );
+    } catch (e) {
+      console.error('[Main] pip install 失败:', e.message);
+    }
+  }
+
+  console.log(`[Main] 启动后端: ${pythonExe} ${scriptPath}`);
+  pythonProcess = spawn(pythonExe, [scriptPath], {
+    cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  });
 
   pythonProcess.stdout.on('data', (data) => {
     console.log(`[Python] ${data.toString().trim()}`);
@@ -180,7 +184,7 @@ app.whenReady().then(async () => {
     console.log('[Main] 后端 API 就绪');
   } catch (err) {
     console.error('[Main] 后端连接失败:', err.message);
-    dialog.showErrorBox('启动失败', '无法连接到后端服务，请确认以管理员权限运行。');
+    dialog.showErrorBox('启动失败', '无法连接到后端服务。\n请确认：\n1. 已安装 Python 3.9+\n2. 已安装依赖 (pip install -r requirements.txt)\n3. 以管理员权限运行');
   }
 
   createWindow();

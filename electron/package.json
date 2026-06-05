@@ -31,7 +31,8 @@
     "files": [
       "dist/**/*",
       "main.cjs",
-      "preload.cjs"
+      "preload.cjs",
+      "app.ico"
     ],
     "extraResources": [
       {

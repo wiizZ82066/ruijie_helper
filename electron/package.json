@@ -34,14 +34,23 @@
     ],
     "extraResources": [
       {
-        "from": "../backend.exe",
-        "to": "backend.exe"
+        "from": "../backend",
+        "to": "backend"
+      },
+      {
+        "from": "../utils",
+        "to": "utils"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "requirements.txt"
       }
     ],
     "win": {
       "target": "nsis",
       "icon": "app.png",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "requireAdministrator",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,

@@ -9,10 +9,11 @@ const API_PORT = 18921;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 
 // ── 管理员权限检查 ────────────────────────────────────
-
+// 使用 whoami 检测管理员组 SID (S-1-16-12288)，比 net session 更可靠
+// 打包后 manifest 已 requireAdministrator，信任系统提权
 function isAdmin() {
   try {
-    execSync('net session', { stdio: 'ignore', windowsHide: true });
+    execSync('whoami /groups | findstr "S-1-16-12288"', { stdio: 'ignore', windowsHide: true });
     return true;
   } catch {
     return false;
@@ -163,13 +164,10 @@ ipcMain.handle('api-request', async (event, { method, endpoint, body }) => {
 // ── 应用生命周期 ────────────────────────────────────────
 
 app.whenReady().then(async () => {
-  // 检查管理员权限，如未提权则重新以管理员身份启动
-  if (!isAdmin()) {
-    const { exec } = require('child_process');
-    exec(
-      `powershell -Command "Start-Process -FilePath '${process.execPath}' -Verb RunAs"`,
-      { windowsHide: true }
-    );
+  // 打包后 manifest 已 requireAdministrator，无需重复提权
+  // 开发模式下检查一次，如非管理员则友好提示
+  if (!app.isPackaged && !isAdmin()) {
+    dialog.showErrorBox('权限不足', '请以管理员身份运行此程序。\n\n右键点击程序 -> 「以管理员身份运行」');
     app.quit();
     return;
   }

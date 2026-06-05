@@ -48,7 +48,7 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "app.png",
+      "icon": "app.ico",
       "requestedExecutionLevel": "requireAdministrator",
       "signAndEditExecutable": false
     },

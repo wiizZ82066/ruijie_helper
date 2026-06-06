@@ -310,7 +310,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.func_list, 1)
 
         # 底部版本号
-        ver = QLabel("  v5.0.0")
+        ver = QLabel("  v3.0.0")
         ver.setStyleSheet("color: #484f58; padding: 8px 16px; font-size: 11px; background-color: transparent;")
         ver.setFixedHeight(30)
         nav_layout.addWidget(ver)

@@ -1,6 +1,6 @@
 {
   "name": "campus-auth",
-  "version": "5.0.0",
+  "version": "3.0.0",
   "description": "校园网认证助手 - Campus Network Authentication Helper",
   "main": "main.cjs",
   "scripts": {
@@ -20,7 +20,6 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
-    "rcedit": "^5.0.2",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
     "wait-on": "^8.0.1"
@@ -31,8 +30,7 @@
     "files": [
       "dist/**/*",
       "main.cjs",
-      "preload.cjs",
-      "app.ico"
+      "preload.cjs"
     ],
     "extraResources": [
       {
@@ -49,20 +47,9 @@
       }
     ],
     "win": {
-      "target": "nsis",
+      "target": "portable",
       "icon": "app.png",
-      "requestedExecutionLevel": "requireAdministrator",
-      "signAndEditExecutable": false
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "app.ico",
-      "uninstallerIcon": "app.ico",
-      "installerHeaderIcon": "app.ico",
-      "createDesktopShortcut": true,
-      "shortcutName": "校园网认证助手",
-      "artifactName": "校园网认证助手_Setup_${version}.${ext}"
+      "requestedExecutionLevel": "requireAdministrator"
     }
   }
 }

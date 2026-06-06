@@ -1,76 +1,73 @@
-"""
-移动热点管理器 — 多模式支持
-
-网络访问模式：
-  - nat (路由器模式): WinNAT + 静态 IP (192.168.137.1) — 主力
-  - ics (共享模式): HNetCfg.HNetShare COM — 传统
-  - bridge (桥接模式): 网络桥接 — 同子网
-
-互联网连接：
-  - automatic: 自动检测当前联网网卡
-  - 手动选择: 用户指定网卡
-"""
-
 import subprocess
 import time
 import platform
-from typing import Optional
-
 from utils.supplicant import SupplicantConfig
-from utils.nat_manager import NATManager
-from utils.bridge_manager import BridgeManager
 
+# Windows API 常量：创建进程时不显示控制台窗口
 CREATE_NO_WINDOW = 0x08000000
 
-# 支持的网络访问模式
-NETWORK_ACCESS_MODES = {
-    "nat": "路由器模式 (NAT)",
-    "ics": "共享模式 (ICS)",
-    "bridge": "桥接模式 (Bridge)",
-}
-
-
 class HotspotManager:
-    """移动热点管理器。支持三种网络访问模式和互联网网卡选择。"""
-
-    # ── 配置管理 ────────────────────────────────────
+    """Windows 移动热点管理工具。
+    通过 PowerShell 脚本调用 Windows Runtime API 来启动、停止和查询热点状态。
+    """
 
     @staticmethod
     def load_config() -> dict:
-        full = SupplicantConfig.load()
-        config = full.get("hotspot_config")
+        """加载热点配置，若不存在则返回默认值。
+        返回字典，包含 ssid、password 和 band（目前未使用频段）。
+        """
+
+        full = SupplicantConfig.load()  # 加载完整配置
+        config = full.get("hotspot_config") # 获取子配置
         if not isinstance(config, dict):
             config = {}
         return {
-            "ssid": config.get("ssid", "test"),
-            "password": config.get("password", "12345678"),
-            "band": config.get("band", "2.4GHz"),
-            "network_access": config.get("network_access", "nat"),
-            "internet_adapter": config.get("internet_adapter", "automatic"),
+            "ssid": config.get("ssid", "sruijiem"), # 默认SSID
+            "password": config.get("password", "12345678"), # 默认密码
+            "band": config.get("band", "2.4GHz")    # 默认频段
         }
 
     @staticmethod
     def save_config(hotspot_config: dict):
+        """保存热点配置到文件。"""
         full = SupplicantConfig.load()
         full["hotspot_config"] = hotspot_config
         SupplicantConfig.save(full)
 
-    # ── PowerShell 执行器 ──────────────────────────
-
     @staticmethod
     def _run_powershell(script: str, timeout: int = 25) -> tuple[int, str, str]:
+        """内部方法：以静默方式执行一段 PowerShell 脚本。
+        参数：
+            script: 要执行的脚本内容。
+            timeout: 命令超时时间（秒）。
+        返回：
+            (返回码, 标准输出字符串, 标准错误字符串)
+        """
         startupinfo = None
         if platform.system() == "Windows":
+            # 设置启动信息，隐藏窗口
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
 
         try:
             result = subprocess.run(
-                ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-                 "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", script],
-                capture_output=True, text=True, encoding="utf-8", errors="ignore",
-                timeout=timeout, startupinfo=startupinfo, creationflags=CREATE_NO_WINDOW,
+                [
+                    "powershell.exe",
+                    "-NoLogo",  # 不显示版权信息
+                    "-NoProfile",   # 不加载用户配置
+                    "-NonInteractive",  # 非交互模式
+                    "-WindowStyle", "Hidden",   # 隐藏窗口
+                    "-ExecutionPolicy", "Bypass",   # 绕过执行策略限制
+                    "-Command", script  # 需执行的脚本
+                ],
+                capture_output=True,    # 捕获标准输出和标准错误
+                text=True,  # 返回输出字符串
+                encoding="utf-8",
+                errors="ignore",
+                timeout=timeout,    # 超时设定
+                startupinfo=startupinfo,    # 隐藏窗口
+                creationflags=CREATE_NO_WINDOW
             )
             return result.returncode, result.stdout.strip(), result.stderr.strip()
         except subprocess.TimeoutExpired:
@@ -78,251 +75,143 @@ class HotspotManager:
         except Exception as e:
             return -1, "", str(e)
 
-    # ── HostedNetwork 操作 ─────────────────────────
-
-    @staticmethod
-    def _is_hostednetwork_supported() -> bool:
-        script = 'netsh wlan show drivers | Select-String "Hosted network supported"'
-        rc, out, _ = HotspotManager._run_powershell(script, timeout=5)
-        return "Yes" in out or "是" in out
-
-    @staticmethod
-    def _hostednetwork_status() -> Optional[str]:
-        script = '''$info = netsh wlan show hostednetwork
-$statusLine = $info | Select-String "Hosted network status"
-if (-not $statusLine) { Write-Output "NOT_SUPPORTED"; exit 0 }
-if ($statusLine -match "Started|已启动") { Write-Output "STARTED" }
-else { Write-Output "STOPPED" }
-'''
-        rc, out, _ = HotspotManager._run_powershell(script, timeout=5)
-        if rc != 0: return None
-        return out
-
-    @staticmethod
-    def _start_hostednetwork(ssid: str, key: str) -> tuple[bool, str]:
-        ssid_safe = ssid.replace('"', '""')
-        key_safe = key.replace('"', '""')
-        script = f'''$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-netsh wlan set hostednetwork mode=allow ssid="{ssid_safe}" key="{key_safe}"
-if ($LASTEXITCODE -ne 0) {{ Write-Output "FAIL:设置 hostednetwork 失败"; exit 1 }}
-netsh wlan start hostednetwork
-if ($LASTEXITCODE -ne 0) {{
-    $err = netsh wlan show hostednetwork | Select-String "Hosted network status"
-    Write-Output "FAIL:启动失败: $($err.Line)"
-    exit 1
-}}
-Write-Output "OK"
-'''
-        rc, out, err = HotspotManager._run_powershell(script, timeout=15)
-        if out == "OK":
-            return True, ""
-        fail_msg = out if out.startswith("FAIL:") else (err or "未知错误")
-        return False, fail_msg
-
-    @staticmethod
-    def _stop_hostednetwork() -> tuple[bool, str]:
-        script = '''netsh wlan stop hostednetwork
-Write-Output "OK"
-'''
-        rc, out, err = HotspotManager._run_powershell(script, timeout=10)
-        if rc == 0:
-            return True, ""
-        return False, err or "停止 hostednetwork 失败"
-
-    @staticmethod
-    def _find_hotspot_adapter() -> Optional[str]:
-        """自动检测热点虚拟网卡名称。"""
-        script = '''$ErrorActionPreference = 'SilentlyContinue'
-$ProgressPreference = 'SilentlyContinue'
-# netsh 检测
-$info = netsh wlan show hostednetwork
-if ($info -match "Name\\s*[:：]\\s*(.+)$") {
-    Write-Output $matches[1].Trim()
-    exit 0
-}
-# 按名称查找
-$ad = Get-NetAdapter | Where-Object { $_.Name -like "本地连接*" -or $_.Name -like "*Hosted*" } | Select-Object -First 1
-if ($ad) { Write-Output $ad.Name; exit 0 }
-Write-Output ""
-'''
-        rc, out, _ = HotspotManager._run_powershell(script, timeout=5)
-        if rc == 0 and out:
-            return out
-        return None
-
-    # ── 互联网网卡检测 ─────────────────────────────
-
-    @staticmethod
-    def get_internet_adapters() -> list:
-        """获取所有有互联网连接的网卡列表。"""
-        script = '''$ErrorActionPreference = 'SilentlyContinue'
-$ProgressPreference = 'SilentlyContinue'
-$result = @()
-# 默认网关路由
-$routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Where-Object { $_.NextHop -ne "0.0.0.0" }
-foreach ($route in $routes) {
-    $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
-    if ($adapter -and $adapter.Status -eq "Up") {
-        $ip = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-        $result += @{ name=$adapter.Name; status=$adapter.Status; ip=if($ip){$ip.IPAddress}else{$null}; gateway=$route.NextHop; speed=$adapter.LinkSpeed; hasInternet=$true }
-    }
-}
-# 补充其他活跃网卡
-$allUp = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.Name -notlike "*本地连接**" -and $_.Name -notlike "*Virtual*" -and $_.Name -notlike "*Bluetooth*" }
-$checked = @{}
-foreach ($r in $result) { $checked[$r.name] = $true }
-foreach ($ad in $allUp) {
-    if (-not $checked.ContainsKey($ad.Name)) {
-        $ip = Get-NetIPAddress -InterfaceIndex $ad.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-        $result += @{ name=$ad.Name; status=$ad.Status; ip=if($ip){$ip.IPAddress}else{$null}; gateway=$null; speed=$ad.LinkSpeed; hasInternet=$false }
-    }
-}
-$result | ConvertTo-Json -Compress
-'''
-        rc, out, _ = HotspotManager._run_powershell(script, timeout=10)
-        import json
-        if rc == 0 and out:
-            try:
-                return json.loads(out) if out else []
-            except:
-                return []
-        return []
-
-    @staticmethod
-    def get_network_access_modes() -> list:
-        """获取当前系统支持的网络访问模式列表。"""
-        modes = []
-        supported = HotspotManager._is_hostednetwork_supported()
-        if not supported:
-            return [{"id": "tethering", "name": "系统热点 (Tethering)", "available": True}]
-
-        for mode_id, mode_name in NETWORK_ACCESS_MODES.items():
-            modes.append({
-                "id": mode_id,
-                "name": mode_name,
-                "available": True,
-            })
-        return modes
-
-    # ── 连接设备查询 ─────────────────────────────
-
-    @staticmethod
-    def get_connected_devices() -> dict:
-        """获取已连接设备数量和列表。"""
-        devices = NATManager.get_connected_devices()
-        hstatus = HotspotManager.get_hotspot_status()
-        return {
-            "count": len(devices),
-            "devices": devices,
-            "hotspot_running": hstatus == "已启动",
-        }
-
-    # ── 统一状态查询 ────────────────────────────────
-
     @staticmethod
     def get_hotspot_status() -> str:
-        hn_status = HotspotManager._hostednetwork_status()
-        if hn_status == "STARTED":
-            return "已启动"
-        if hn_status == "STOPPED":
-            return "未启动"
-        return "不支持"
+        """查询当前热点的工作状态。
+        返回：
+            "已启动" / "未启动" / "正在切换"
+        """
 
-    # ── 启动热点 ──────────────────────────────────────
+        # PowerShell 脚本：通过 Windows.Networking.NetworkOperators API 获取状态
+        script = '''$ProgressPreference = 'SilentlyContinue'
+$null = Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$cp = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()
+if ($null -eq $cp) { Write-Output "不可用（无网络连接）"; exit 0 }
+$mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($cp)
+if ($null -eq $mgr) { Write-Output "不可用（无法获取管理器）"; exit 0 }
+Write-Output $mgr.TetheringOperationalState
+'''
+        returncode, stdout, stderr = HotspotManager._run_powershell(script)
+        if returncode != 0:
+            return "Unknown"
+
+        raw = stdout.strip().lower()
+        mapping = {
+            "off": "未启动",
+            "on": "已启动",
+            "intransition": "正在切换",
+        }
+        return mapping.get(raw, f"Unknown({raw})")
 
     @staticmethod
-    def start_hotspot(ssid: str = None, key: str = None, band: str = None,
-                      network_access: str = None, internet_adapter: str = None) -> tuple[bool, str]:
-        """
-        启动热点 — 多模式支持。
-
+    def _send_command_and_wait(operation: str, ssid=None, key=None, band=None, timeout=15) -> tuple[bool, str]:
+        """内部方法：发送启动/停止命令，并轮询等待状态变为预期值。
         参数：
-            ssid/key/band: 热点配置
-            network_access: "nat" / "ics" / "bridge" (None=使用配置)
-            internet_adapter: 网卡名 or "automatic" (None=使用配置)
+            operation: "start" 或 "stop"
+            ssid: 热点名称（仅启动时需要）
+            key: 热点密码（仅启动时需要）
+            band: 频段值（0=自动, 1=2.4GHz, 2=5GHz，仅启动时需要）
+            timeout: 最大等待时间（秒）
+        返回：
+            (成功标志, 错误信息字符串)
         """
-        config = HotspotManager.load_config()
-        if ssid is None: ssid = config.get("ssid", "test")
-        if key is None: key = config.get("password", "12345678")
-        if band is None: band = config.get("band", "2.4GHz")
-        if network_access is None: network_access = config.get("network_access", "nat")
-        if internet_adapter is None: internet_adapter = config.get("internet_adapter", "automatic")
 
+        if operation == "start":
+            expected_status = "已启动"
+            # 频段映射：将字符串频段转为 Windows API 数值
+            band_value = 0  # 默认自动
+            if isinstance(band, str):
+                if "5" in band:
+                    band_value = 2
+                elif "2.4" in band:
+                    band_value = 1
+            elif isinstance(band, (int, float)):
+                band_value = int(band)
+
+            script = f'''$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$null = Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$cp = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()
+if ($null -eq $cp) {{ Write-Output "FAIL:无网络连接"; exit 1 }}
+$mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($cp)
+if ($null -eq $mgr) {{ Write-Output "FAIL:无法获取管理器"; exit 1 }}
+$config = $mgr.GetCurrentAccessPointConfiguration()
+$config.Ssid = "{ssid}"
+$config.Passphrase = "{key}"
+$config.Band = {band_value}
+try {{
+    $configAsync = $mgr.ConfigureAccessPointAsync($config)
+}} catch {{}}
+try {{
+    $null = $mgr.StartTetheringAsync()
+    Write-Output "CMD_SENT"
+}} catch {{
+    Write-Output "FAIL:" + $_.Exception.Message
+    exit 1
+}}
+'''
+        else:
+            expected_status = "未启动"
+            # 停止脚本
+            script = '''$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$null = Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$cp = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()
+if ($null -eq $cp) { Write-Output "FAIL:无网络连接"; exit 1 }
+$mgr = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($cp)
+if ($null -eq $mgr) { Write-Output "FAIL:无法获取管理器"; exit 1 }
+try {
+    $null = $mgr.StopTetheringAsync()
+    Write-Output "CMD_SENT"
+} catch {
+    Write-Output "FAIL:" + $_.Exception.Message
+    exit 1
+}
+'''
+
+        # 发送命令（脚本执行超时设为10秒）
+        returncode, stdout, stderr = HotspotManager._run_powershell(script, timeout=10)
+        if returncode != 0 or stdout.startswith("FAIL:"):
+            err = stdout.replace("FAIL:", "").strip() if stdout else stderr
+            return False, err or "命令发送失败"
+
+        # 轮询等待状态切换至目标状态
+        for _ in range(timeout):
+            time.sleep(1)
+            current = HotspotManager.get_hotspot_status()
+            if current == expected_status:
+                return True, ""
+            if current == "错误":
+                return False, "热点状态异常（错误）"
+        return False, f"{'启动' if operation=='start' else '关闭'}超时，请检查系统热点设置"
+
+    @staticmethod
+    def start_hotspot(ssid: str = None, key: str = None, band: str = None) -> tuple[bool, str]:
+        """启动移动热点。
+        参数：
+            ssid: 热点名称，若为 None 则从配置文件读取。
+            key: 热点密码，若为 None 则从配置文件读取。
+            band: 频段，若为 None 则从配置文件读取 ("2.4GHz" / "5GHz")。
+        返回：
+            (是否成功, 错误信息)
+        """
+
+        if ssid is None or key is None or band is None:
+            config = HotspotManager.load_config()
+            ssid = config.get("ssid")
+            key = config.get("password")
+            band = config.get("band", "2.4GHz")
         if HotspotManager.get_hotspot_status() == "已启动":
-            return True, "热点已在运行"
-
-        # 检查 hostednetwork 支持
-        if not HotspotManager._is_hostednetwork_supported():
-            return False, "系统不支持 hostednetwork，请使用系统热点功能"
-
-        # 启动 hostednetwork
-        ok, msg = HotspotManager._start_hostednetwork(ssid, key)
-        if not ok:
-            return False, f"热点启动失败: {msg}"
-
-        time.sleep(2)  # 等待虚拟网卡就绪
-
-        # 获取热点网卡
-        hotspot_adapter = HotspotManager._find_hotspot_adapter()
-        if not hotspot_adapter:
-            return True, "热点已启动，但未检测到虚拟网卡"
-
-        # 确定互联网网卡
-        actual_internet_adapter = internet_adapter
-        if internet_adapter == "automatic":
-            adapters = HotspotManager.get_internet_adapters()
-            # 找到有互联网的网卡
-            for ad in adapters:
-                if ad.get("hasInternet") or ad.get("gateway"):
-                    actual_internet_adapter = ad["name"]
-                    break
-            if not actual_internet_adapter or actual_internet_adapter == "automatic":
-                actual_internet_adapter = None
-
-        # 根据选择的模式配置网络访问
-        if network_access == "nat":
-            ok, msg = NATManager.enable_nat(hotspot_adapter, actual_internet_adapter)
-            if ok:
-                return True, f"热点已启动 (路由器模式 NAT) ✓"
-            return True, f"热点已启动 (NAT 配置: {msg})"
-
-        elif network_access == "ics":
-            # ICS 模式
-            from utils.ics_manager import ICSManager
-            ok, msg = ICSManager.enable_ics(actual_internet_adapter or "", hotspot_adapter)
-            if ok:
-                return True, f"热点已启动 (共享模式 ICS) ✓"
-            return True, f"热点已启动 (ICS 配置: {msg})"
-
-        elif network_access == "bridge":
-            # 桥接模式
-            if not actual_internet_adapter:
-                return True, "热点已启动 (桥接模式需选择互联网网卡)"
-            bridges = [actual_internet_adapter, hotspot_adapter]
-            ok, msg = BridgeManager.create_bridge(bridges)
-            if ok:
-                return True, f"热点已启动 (桥接模式) ✓"
-            return True, f"热点已启动 (桥接配置: {msg})"
-
-        return True, "热点已启动"
-
-    # ── 停止热点 ──────────────────────────────────────
+            return True, ""
+        return HotspotManager._send_command_and_wait("start", ssid, key, band, timeout=15)
 
     @staticmethod
     def stop_hotspot() -> tuple[bool, str]:
+        """停止移动热点。
+        返回：
+            (是否成功, 错误信息)
+        """
+
         if HotspotManager.get_hotspot_status() == "未启动":
             return True, ""
-
-        # 清理所有网络配置
-        NATManager.disable_nat()
-        BridgeManager.remove_bridge()
-        from utils.ics_manager import ICSManager
-        ICSManager.disable_all_ics()
-
-        # 停止 hostednetwork
-        ok, msg = HotspotManager._stop_hostednetwork()
-        if ok:
-            return True, "已停止"
-
-        return False, msg or "停止失败"
+        return HotspotManager._send_command_and_wait("stop", timeout=15)

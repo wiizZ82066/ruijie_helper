@@ -9,11 +9,10 @@ const API_PORT = 18921;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 
 // ── 管理员权限检查 ────────────────────────────────────
-// 使用 whoami 检测管理员组 SID (S-1-16-12288)，比 net session 更可靠
-// 打包后 manifest 已 requireAdministrator，信任系统提权
+
 function isAdmin() {
   try {
-    execSync('whoami /groups | findstr "S-1-16-12288"', { stdio: 'ignore', windowsHide: true });
+    execSync('net session', { stdio: 'ignore', windowsHide: true });
     return true;
   } catch {
     return false;
@@ -27,35 +26,38 @@ function startPythonBackend() {
   const pythonExe = 'python';
   let scriptPath;
   let cwd;
+  let reqPath;
 
   if (isDev) {
     cwd = path.join(__dirname, '..');
+    scriptPath = path.join(cwd, 'backend', 'server.py');
+    reqPath = path.join(cwd, 'requirements.txt');
   } else {
     cwd = process.resourcesPath;
+    scriptPath = path.join(cwd, 'backend', 'server.py');
+    reqPath = path.join(cwd, 'requirements.txt');
   }
-  scriptPath = path.join(cwd, 'backend', 'server.py');
 
-  // 确保 Python 依赖已安装（首次运行可能需要）
-  const reqPath = path.join(cwd, 'requirements.txt');
+  // 确保 Python 依赖已安装
+  const installCmd = `"${pythonExe}" -m pip install -r "${reqPath}" --quiet 2>&1`;
+  console.log('[Main] Checking Python dependencies...');
   try {
-    require('child_process').execSync(
-      `"${pythonExe}" -c "import fastapi, uvicorn, psutil, qrcode"`,
-      { stdio: 'ignore', windowsHide: true, timeout: 5000 }
-    );
-  } catch {
-    try {
-      require('child_process').execSync(
-        `"${pythonExe}" -m pip install -r "${reqPath}" --quiet`,
-        { stdio: 'ignore', windowsHide: true, timeout: 30000 }
-      );
-    } catch (e) {
-      console.error('[Main] pip install 失败:', e.message);
-    }
+    const result = require('child_process').execSync(installCmd, {
+      cwd,
+      windowsHide: true,
+      timeout: 60000,
+    });
+    console.log('[Main] Python dependencies OK');
+  } catch (e) {
+    console.error('[Main] pip install warning:', e.message);
   }
 
-  console.log(`[Main] 启动后端: ${pythonExe} ${scriptPath}`);
+  console.log(`[Main] Starting Python backend: ${pythonExe} ${scriptPath}`);
+
   pythonProcess = spawn(pythonExe, [scriptPath], {
-    cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
   pythonProcess.stdout.on('data', (data) => {
@@ -67,19 +69,19 @@ function startPythonBackend() {
   });
 
   pythonProcess.on('close', (code) => {
-    console.log(`[Python] 进程退出, code=${code}`);
+    console.log(`[Python] Process exited with code ${code}`);
     pythonProcess = null;
   });
 
   pythonProcess.on('error', (err) => {
-    console.error(`[Python] 启动失败: ${err.message}`);
+    console.error(`[Python] Failed to start: ${err.message}`);
     pythonProcess = null;
   });
 }
 
-// ── 等待 API 就绪（快速检测）───────────────────────────
+// ── 等待 API 就绪 ───────────────────────────────────────
 
-function waitForAPI(retries = 30, delay = 200) {
+function waitForAPI(retries = 30, delay = 500) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
       http.get(`${API_BASE}/api/health`, (res) => {
@@ -88,13 +90,13 @@ function waitForAPI(retries = 30, delay = 200) {
         } else if (remaining > 0) {
           setTimeout(() => check(remaining - 1), delay);
         } else {
-          reject(new Error('API 超时'));
+          reject(new Error('API timeout'));
         }
       }).on('error', () => {
         if (remaining > 0) {
           setTimeout(() => check(remaining - 1), delay);
         } else {
-          reject(new Error('API 无法连接'));
+          reject(new Error('API not reachable'));
         }
       });
     };
@@ -116,7 +118,6 @@ function createWindow() {
     title: '校园网认证助手',
     icon: path.join(__dirname, 'app.ico'),
     frame: true,
-    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -124,6 +125,7 @@ function createWindow() {
     },
   });
 
+  // 去掉菜单栏
   mainWindow.setMenuBarVisibility(false);
 
   if (isDev) {
@@ -132,11 +134,6 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
-
-  // 等页面加载完成后才显示窗口，减少白屏感
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -168,23 +165,25 @@ ipcMain.handle('api-request', async (event, { method, endpoint, body }) => {
 // ── 应用生命周期 ────────────────────────────────────────
 
 app.whenReady().then(async () => {
-  // 打包后 manifest 已 requireAdministrator，无需重复提权
-  // 开发模式下检查一次，如非管理员则友好提示
-  if (!app.isPackaged && !isAdmin()) {
-    dialog.showErrorBox('权限不足', '请以管理员身份运行此程序。\n\n右键点击程序 -> 「以管理员身份运行」');
+  // 检查管理员权限，如未提权则重新以管理员身份启动
+  if (!isAdmin()) {
+    const { exec } = require('child_process');
+    exec(
+      `powershell -Command "Start-Process -FilePath '${process.execPath}' -Verb RunAs"`,
+      { windowsHide: true }
+    );
     app.quit();
     return;
   }
 
-  // 启动后端（无 pip install，打包后直接启动预编译 exe）
   startPythonBackend();
 
   try {
     await waitForAPI();
-    console.log('[Main] 后端 API 就绪');
+    console.log('[Main] Python API is ready');
   } catch (err) {
-    console.error('[Main] 后端连接失败:', err.message);
-    dialog.showErrorBox('启动失败', '无法连接到后端服务。\n请确认：\n1. 已安装 Python 3.9+\n2. 已安装依赖 (pip install -r requirements.txt)\n3. 以管理员权限运行');
+    console.error('[Main] Failed to connect to Python API:', err.message);
+    dialog.showErrorBox('启动失败', '无法连接到后端服务，请检查 Python 环境。');
   }
 
   createWindow();

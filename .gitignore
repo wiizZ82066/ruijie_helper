@@ -1,7 +1,5 @@
 # ── 构建输出 ────────────────────────────
 exe/
-electron/dist/
-electron/node_modules/
 *.exe
 *.msi
 
@@ -25,10 +23,3 @@ desktop.ini
 
 # ── 日志 ───────────────────────────────
 *.log
-
-# ── 构建产物 ───────────────────────────
-*.zip
-*.xml
-backend.exe
-*.build/
-*.dist/

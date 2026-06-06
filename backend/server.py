@@ -1,5 +1,5 @@
 """
-校园网认证助手 V5 — FastAPI 后端服务
+校园网认证助手 — FastAPI 后端服务
 提供 REST API 供 Electron 前端调用，封装所有 Windows 系统操作。
 端口: 18921
 """
@@ -20,10 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.network_adapter import NetworkAdapterManager
 from utils.supplicant import SupplicantManager, SupplicantConfig
 from utils.hotspot import HotspotManager
-from utils.ics_manager import ICSManager
-from utils.nat_manager import NATManager
 
-app = FastAPI(title="CampusAuth API", version="5.0")
+app = FastAPI(title="CampusAuth API", version="3.0")
 
 # 允许 Electron 跨域访问
 app.add_middleware(
@@ -40,8 +38,6 @@ class HotspotConfigModel(BaseModel):
     ssid: str
     password: str
     band: str
-    network_access: str = "nat"
-    internet_adapter: str = "automatic"
 
 
 class TargetFolderModel(BaseModel):
@@ -52,7 +48,7 @@ class TargetFolderModel(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "5.0"}
+    return {"status": "ok", "version": "3.0"}
 
 
 # ─── 网卡管理 ────────────────────────────────────────────
@@ -134,21 +130,6 @@ def get_move_record():
 
 # ─── 热点管理 ────────────────────────────────────────────
 
-@app.get("/api/hotspot/ics-status")
-def hotspot_ics_status():
-    """获取 ICS 共享配置状态。"""
-    return ICSManager.get_ics_status()
-
-
-@app.post("/api/hotspot/repair-ics")
-def hotspot_repair_ics():
-    """一键修复 ICS 共享配置。"""
-    ok, msg = ICSManager.repair_ics()
-    if not ok:
-        raise HTTPException(500, msg or "ICS 修复失败")
-    return {"success": True, "message": msg}
-
-
 @app.get("/api/hotspot/status")
 def hotspot_status():
     """获取热点运行状态。"""
@@ -156,38 +137,13 @@ def hotspot_status():
     return {"status": status, "running": status == "已启动"}
 
 
-@app.get("/api/hotspot/connected-devices")
-def hotspot_connected_devices():
-    """获取已连接设备数量和列表。"""
-    return HotspotManager.get_connected_devices()
-
-
-@app.get("/api/hotspot/modes")
-def hotspot_modes():
-    """获取支持的网络访问模式列表。"""
-    return {"modes": HotspotManager.get_network_access_modes()}
-
-
-@app.get("/api/network/internet-adapters")
-def internet_adapters():
-    """获取有互联网连接的网卡列表（供选择）。"""
-    return {"adapters": HotspotManager.get_internet_adapters()}
-
-
 @app.post("/api/hotspot/start")
-def start_hotspot(mode: str = None, internet_adapter: str = None):
-    """启动热点。
-    可选参数：
-        mode: "nat" / "ics" / "bridge"
-        internet_adapter: 网卡名 / "automatic"
-    """
-    ok, msg = HotspotManager.start_hotspot(
-        network_access=mode,
-        internet_adapter=internet_adapter,
-    )
+def start_hotspot():
+    """启动热点（使用已保存的配置）。"""
+    ok, msg = HotspotManager.start_hotspot()
     if not ok:
         raise HTTPException(500, msg or "启动失败")
-    return {"success": True, "message": msg}
+    return {"success": True}
 
 
 @app.post("/api/hotspot/stop")
@@ -210,8 +166,6 @@ def get_hotspot_config():
         "ssid": config.get("ssid", ""),
         "password": config.get("password", ""),
         "band": config.get("band", "2.4GHz"),
-        "network_access": config.get("network_access", "nat"),
-        "internet_adapter": config.get("internet_adapter", "automatic"),
         "target_folder": target,
     }
 
@@ -227,9 +181,7 @@ def save_hotspot_config(body: HotspotConfigModel):
     HotspotManager.save_config({
         "ssid": body.ssid,
         "password": body.password,
-        "band": body.band,
-        "network_access": body.network_access,
-        "internet_adapter": body.internet_adapter,
+        "band": body.band
     })
 
     # 如果热点正在运行，重启以应用新配置

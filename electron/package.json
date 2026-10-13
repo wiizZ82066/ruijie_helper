@@ -30,7 +30,8 @@
     "files": [
       "dist/**/*",
       "main.cjs",
-      "preload.cjs"
+      "preload.cjs",
+      "app.ico"
     ],
     "extraResources": [
       {
@@ -48,7 +49,7 @@
     ],
     "win": {
       "target": "portable",
-      "icon": "app.png",
+      "icon": "app.ico",
       "requestedExecutionLevel": "requireAdministrator"
     }
   }

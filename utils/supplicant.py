@@ -13,9 +13,7 @@ def _get_data_dir() -> Path:
     """用户数据目录（%APPDATA%/ruijie_helper）"""
     # 优先使用 APPDATA 环境变量（Windows），否则回退到用户主目录
     base = Path(os.environ.get("APPDATA", os.path.expanduser("~")))
-    data_dir = base / "ruijie_helper"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
+    return base / "ruijie_helper"
 
 # 配置文件路径：%APPDATA%/ruijie_helper/config.json
 RECORD_FILE = _get_data_dir() / "config.json"
@@ -75,10 +73,10 @@ class SupplicantConfig:
 
     @staticmethod
     def get_target_folder() -> str:
-        """获取目标文件夹路径，默认值为 D:/temp_folder。"""
+        """获取用户选择的隔离目录，默认位于当前用户的数据目录。"""
         folder = SupplicantConfig.load().get("move_target_folder", "")
         if not folder:
-            folder = "D:/temp_folder"
+            folder = str(RECORD_FILE.parent / "quarantine")
         return folder
 
     @staticmethod
@@ -124,6 +122,7 @@ class SupplicantManager:
         try:
             subprocess.Popen(
                 [exe_path], #直接传列表
+                cwd=str(Path(exe_path).resolve().parent),
                 creationflags=CREATE_NO_WINDOW,
                 shell=False
             )

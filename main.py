@@ -2,6 +2,7 @@ import sys
 import ctypes
 import os
 import datetime
+import subprocess
 
 def hide_console():
     """隐藏当前进程的控制台窗口（如果存在）。"""
@@ -29,7 +30,8 @@ def setup_logging():
     """
     if getattr(sys, 'frozen', False):
         # 使用 LOCALAPPDATA 目录存放日志
-        log_dir = os.path.join(os.environ.get("LOCALAPPDATA", "."), "CampusAuth")
+        local_data = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        log_dir = os.path.join(local_data, "CampusAuth")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "app.log")
         sys.stdout = open(log_path, "w", encoding="utf-8")
@@ -40,8 +42,9 @@ if __name__ == "__main__":
     # 如果不是管理员，尝试以管理员权限重新运行自身
     if not is_admin():
         # ShellExecuteW 以 runas 启动，请求管理员提权
+        arguments = sys.argv[1:] if getattr(sys, "frozen", False) else [os.path.abspath(sys.argv[0]), *sys.argv[1:]]
         ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            None, "runas", sys.executable, subprocess.list2cmdline(arguments), None, 1
         )
         # 当前非管理员实例直接退出
         sys.exit()

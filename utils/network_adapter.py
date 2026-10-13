@@ -1,3 +1,5 @@
+import base64
+import json
 import subprocess
 from typing import List, Tuple
 
@@ -5,7 +7,7 @@ from typing import List, Tuple
 CREATE_NO_WINDOW = 0x08000000
 
 class NetworkAdapterManager:
-    """网络适配器管理工具，通过 netsh 命令获取和设置网卡状态。"""
+    """枚举结构化网卡状态，并用无 shell 的参数列表改变用户选中网卡。"""
 
     @staticmethod
     def get_adapters() -> List[Tuple[str, str]]:
@@ -13,31 +15,26 @@ class NetworkAdapterManager:
         获取所有网络适配器的名称及其启用/禁用状态。
         返回一个列表，每个元素为 (适配器名称, 状态字符串 "Enabled" 或 "Disabled")。
         """
+        script = r'''$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$items=@(Get-NetAdapter | ForEach-Object {
+ @{name=[string]$_.Name; enabled=([int]$_.AdminStatus -eq 1)}
+})
+ConvertTo-Json -InputObject $items -Compress
+'''
         try:
             output = subprocess.check_output(
-                ["netsh", "interface", "show", "interface"],
-                encoding="utf-8",
-                errors="ignore",
-                creationflags=CREATE_NO_WINDOW #隐藏控制台
-            )
-        except subprocess.CalledProcessError:
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                 "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+                encoding="utf-8", errors="strict", timeout=15, creationflags=CREATE_NO_WINDOW)
+            data = json.loads(output)
+            if not isinstance(data, list):
+                return []
+            return [(item["name"], "Enabled" if item["enabled"] else "Disabled")
+                    for item in data if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    and type(item.get("enabled")) is bool]
+        except (OSError, subprocess.SubprocessError, ValueError):
             return []
-
-        adapters = []
-        for line in output.splitlines():
-            parts = line.split(None, 3)
-            if len(parts) < 4:
-                continue
-
-            status_str = parts[0].strip() #状态
-            name = parts[3].strip() #适配器名称
-
-            # 判断状态
-            if status_str in ("Enabled", "已启用"):
-                adapters.append((name, "Enabled"))
-            elif status_str in ("Disabled", "已禁用"):
-                adapters.append((name, "Disabled"))
-        return adapters
 
     @staticmethod
     def set_adapter_state(name: str, enable: bool) -> bool:
@@ -50,17 +47,20 @@ class NetworkAdapterManager:
             操作成功返回 True，失败返回 False
         """
 
+        if not isinstance(name, str) or not name or any(ord(char) < 32 for char in name):
+            return False
         action = "enable" if enable else "disable"
-        cmd = f'netsh interface set interface "{name}" admin={action}'
+        cmd = ["netsh", "interface", "set", "interface", f"name={name}", f"admin={action}"]
 
         try:
             #执行指令
             subprocess.run(
-                cmd, shell=True,
+                cmd, shell=False,
                 check=True,
                 capture_output=True,
+                timeout=15,
                 creationflags=CREATE_NO_WINDOW
             )
             return True
-        except subprocess.CalledProcessError:
+        except (OSError, subprocess.SubprocessError):
             return False

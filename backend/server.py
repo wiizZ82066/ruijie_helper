@@ -5,13 +5,15 @@
 """
 
 import sys
+import os
+import secrets
 import base64
 import uvicorn
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # 将项目根目录加入 path，以便导入 utils 模块
@@ -20,16 +22,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.network_adapter import NetworkAdapterManager
 from utils.supplicant import SupplicantManager, SupplicantConfig
 from utils.hotspot import HotspotManager
+from utils.client_discovery import discover_client_dir
 
 app = FastAPI(title="CampusAuth API", version="3.0")
 
-# 允许 Electron 跨域访问
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Only the parent Electron process receives this per-launch secret. Keep it
+# out of URLs, command arguments, renderer state, child environments and logs.
+SESSION_TOKEN = os.environ.pop("CAMPUS_AUTH_SESSION_TOKEN", "")
+
+
+@app.middleware("http")
+async def require_session(request: Request, call_next):
+    if len(SESSION_TOKEN) < 32:
+        return JSONResponse({"detail": "后端会话未初始化，请从桌面程序启动。"}, status_code=503)
+    supplied = request.headers.get("authorization", "")
+    expected = "Bearer " + SESSION_TOKEN
+    if not secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        return JSONResponse({"detail": "未授权的桌面会话。"}, status_code=401)
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ─── 数据模型 ────────────────────────────────────────────
@@ -42,6 +54,10 @@ class HotspotConfigModel(BaseModel):
 
 class TargetFolderModel(BaseModel):
     folder: str
+
+
+class ProcessStartModel(BaseModel):
+    exe_path: Optional[str] = None
 
 
 # ─── 根路由 ──────────────────────────────────────────────
@@ -92,11 +108,19 @@ def get_process_status():
 
 
 @app.post("/api/process/start")
-def start_process(exe_path: Optional[str] = None):
-    """启动指定路径的 8021x.exe。"""
-    if not exe_path:
-        raise HTTPException(400, "未指定 exe_path")
-    ok = SupplicantManager.start_exe(exe_path)
+def start_process(body: ProcessStartModel):
+    """只允许启动已发现安装目录中的认证核心。"""
+    directory = discover_client_dir()
+    if not directory:
+        raise HTTPException(400, "未找到已安装的锐捷客户端。")
+    expected = (Path(directory) / "8021x.exe").resolve()
+    try:
+        selected = Path(body.exe_path).resolve() if body.exe_path else expected
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "认证核心路径无效。") from None
+    if str(selected).casefold() != str(expected).casefold() or not expected.is_file():
+        raise HTTPException(400, "只能启动已发现安装目录中的认证核心。")
+    ok = SupplicantManager.start_exe(str(expected))
     if not ok:
         raise HTTPException(500, "启动失败")
     return {"success": True}
@@ -225,11 +249,13 @@ def get_qr_code():
         img.save(buffer, format="PNG")
         b64 = base64.b64encode(buffer.getvalue()).decode()
         return {"base64": f"data:image/png;base64,{b64}"}
-    except Exception as e:
-        raise HTTPException(500, f"二维码生成失败: {e}")
+    except Exception:
+        raise HTTPException(500, "二维码生成失败，请检查热点配置。") from None
 
 
 # ─── 启动 ────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=18921, log_level="warning")
+    if len(SESSION_TOKEN) < 32:
+        raise SystemExit("请从桌面程序启动后端，或先配置临时桌面会话。")
+    uvicorn.run(app, host="127.0.0.1", port=18921, log_level="warning", access_log=False)

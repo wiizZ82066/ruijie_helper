@@ -10,6 +10,14 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+release/
+# Local reverse-engineering captures, native binaries and machine diagnostics.
+analysis/
+node_modules/
+.venv/
+venv/
+.pytest_cache/
+*.spec
 
 # ── IDE & 工具 ─────────────────────────
 .idea/
@@ -23,3 +31,19 @@ desktop.ini
 
 # ── 日志 ───────────────────────────────
 *.log
+
+# Runtime credentials, profiles and captures must never enter a source release.
+.env
+.env.*
+!.env.example
+*.dpapi
+SuConfig.dat
+userinfo.dat
+SupplicantResult.ini
+supplicant_config.json
+config.json
+settings.json
+*.pcap
+*.pcapng
+*.etl
+nuitka-crash-report.xml

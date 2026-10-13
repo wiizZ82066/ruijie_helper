@@ -2,11 +2,13 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
+const { randomBytes } = require('crypto');
 
 let mainWindow = null;
 let pythonProcess = null;
 const API_PORT = 18921;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
+const API_TOKEN = randomBytes(32).toString('hex');
 
 // ── 管理员权限检查 ────────────────────────────────────
 
@@ -26,55 +28,34 @@ function startPythonBackend() {
   const pythonExe = 'python';
   let scriptPath;
   let cwd;
-  let reqPath;
 
   if (isDev) {
     cwd = path.join(__dirname, '..');
     scriptPath = path.join(cwd, 'backend', 'server.py');
-    reqPath = path.join(cwd, 'requirements.txt');
   } else {
     cwd = process.resourcesPath;
     scriptPath = path.join(cwd, 'backend', 'server.py');
-    reqPath = path.join(cwd, 'requirements.txt');
   }
 
-  // 确保 Python 依赖已安装
-  const installCmd = `"${pythonExe}" -m pip install -r "${reqPath}" --quiet 2>&1`;
-  console.log('[Main] Checking Python dependencies...');
-  try {
-    const result = require('child_process').execSync(installCmd, {
-      cwd,
-      windowsHide: true,
-      timeout: 60000,
-    });
-    console.log('[Main] Python dependencies OK');
-  } catch (e) {
-    console.error('[Main] pip install warning:', e.message);
-  }
-
-  console.log(`[Main] Starting Python backend: ${pythonExe} ${scriptPath}`);
-
+  // Dependencies belong to installation, not every application launch.
+  // Never log environment values, configuration, or raw Python exception text.
   pythonProcess = spawn(pythonExe, [scriptPath], {
     cwd,
+    env: { ...process.env, CAMPUS_AUTH_SESSION_TOKEN: API_TOKEN },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
 
-  pythonProcess.stdout.on('data', (data) => {
-    console.log(`[Python] ${data.toString().trim()}`);
-  });
-
-  pythonProcess.stderr.on('data', (data) => {
-    console.error(`[Python ERR] ${data.toString().trim()}`);
-  });
+  pythonProcess.stdout.on('data', () => {});
+  pythonProcess.stderr.on('data', () => {});
 
   pythonProcess.on('close', (code) => {
     console.log(`[Python] Process exited with code ${code}`);
     pythonProcess = null;
   });
 
-  pythonProcess.on('error', (err) => {
-    console.error(`[Python] Failed to start: ${err.message}`);
+  pythonProcess.on('error', () => {
+    console.error('[Python] Backend could not start; check the Python environment.');
     pythonProcess = null;
   });
 }
@@ -84,7 +65,12 @@ function startPythonBackend() {
 function waitForAPI(retries = 30, delay = 500) {
   return new Promise((resolve, reject) => {
     const check = (remaining) => {
-      http.get(`${API_BASE}/api/health`, (res) => {
+      if (!pythonProcess) {
+        reject(new Error('Backend is not running'));
+        return;
+      }
+      http.get(`${API_BASE}/api/health`, { headers: { Authorization: `Bearer ${API_TOKEN}` } }, (res) => {
+        res.resume();
         if (res.statusCode === 200) {
           resolve();
         } else if (remaining > 0) {
@@ -127,6 +113,8 @@ function createWindow() {
 
   // 去掉菜单栏
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
@@ -143,10 +131,15 @@ function createWindow() {
 // ── IPC 处理器 ──────────────────────────────────────────
 
 ipcMain.handle('api-request', async (event, { method, endpoint, body }) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents ||
+      !['GET', 'POST', 'PUT'].includes(method) || typeof endpoint !== 'string' ||
+      !/^\/api\/[A-Za-z0-9_/%.-]+$/.test(endpoint)) {
+    return { ok: false, status: 400, data: { detail: 'Invalid desktop request' } };
+  }
   const url = `${API_BASE}${endpoint}`;
   const options = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_TOKEN}` },
   };
 
   if (body && method !== 'GET') {
@@ -167,11 +160,15 @@ ipcMain.handle('api-request', async (event, { method, endpoint, body }) => {
 app.whenReady().then(async () => {
   // 检查管理员权限，如未提权则重新以管理员身份启动
   if (!isAdmin()) {
-    const { exec } = require('child_process');
-    exec(
-      `powershell -Command "Start-Process -FilePath '${process.execPath}' -Verb RunAs"`,
-      { windowsHide: true }
-    );
+    const script = "$data=[Console]::In.ReadToEnd()|ConvertFrom-Json;" +
+      "$options=@{FilePath=$data.executable;Verb='RunAs';WindowStyle='Hidden'};" +
+      "if($data.arguments){$options.ArgumentList=$data.arguments};Start-Process @options";
+    const elevate = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+      '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+    elevate.stdin.end(JSON.stringify({ executable: process.execPath,
+      arguments: app.isPackaged ? '' : `"${__dirname}"` }));
+    elevate.on('error', () => {});
     app.quit();
     return;
   }

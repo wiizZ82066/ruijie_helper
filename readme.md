@@ -1,189 +1,68 @@
 # 校园网认证助手
 
-Windows 网络管理工具，集成网卡控制、802.1x 进程管理、移动热点（WiFi Direct）及 WiFi 二维码分享功能。
+推荐入口是 `campus_authenticator.py`：使用已有锐捷认证核心登录校园网，并管理 Windows 移动热点。程序自动查找客户端安装目录，支持账号密码输入、密码显示切换、当前用户加密保存和登录自启动。
 
-提供两种 UI 实现：
-- **Electron 版本**：基于 Electron + React + FastAPI
-- **PySide6 版本**：基于 PySide6 (Qt) + FastAPI
+本项目复用原认证核心及驱动，不是独立重写的校园网协议。兼容安装只接受代码中已核验的 RG-SU 6.61 文件；其他版本不会自动套用修改。
 
-## 技术架构
+## 运行发布包
 
-### Electron 版本
+从 [GitHub Releases 下载最新版](https://github.com/wiizZ82066/ruijie_helper/releases/latest)。
 
-```
-┌─────────────────────────────────────────┐
-│  Electron (桌面壳)                       │
-│  ┌───────────────────────────────────┐  │
-│  │  React 18 + TypeScript (前端 UI)   │  │
-│  │  暗色工业风主题 · 自定义组件        │  │
-│  └──────────┬────────────────────────┘  │
-│             │ IPC (window.api)            │
-│  ┌──────────▼────────────────────────┐  │
-│  │  main.cjs (Node.js 主进程)         │  │
-│  │  · 管理员权限检测 & 自动提权        │  │
-│  │  · 启动 Python 后端 / 依赖安装     │  │
-│  │  · HTTP 请求转发 (127.0.0.1:18921) │  │
-│  └──────────┬────────────────────────┘  │
-└─────────────┼───────────────────────────┘
-              │ HTTP
-┌─────────────▼───────────────────────────┐
-│  FastAPI 后端 (Python)                   │
-│  · /api/adapters    网卡管理             │
-│  · /api/process     8021x 进程控制       │
-│  · /api/hotspot     热点开关/状态        │
-│  · /api/config      配置读写             │
-│  · /api/qrcode      WiFi 二维码          │
-└─────────────┬───────────────────────────┘
-              │ PowerShell / netsh / WinRT
-┌─────────────▼───────────────────────────┐
-│  Windows 系统 API                        │
-└─────────────────────────────────────────┘
-```
+发布包为 `CampusAuthenticator-win-x64.zip`。请完整解压后运行 `CampusAuthenticator/CampusAuthenticator.exe`，并保留同目录的 `_internal` 文件夹。不要只复制 EXE，也不要直接从压缩包内运行。
 
-### PySide6 版本
+本地构建产物位于 `release/CampusAuthenticator/CampusAuthenticator.exe`，压缩包位于 `release/CampusAuthenticator-win-x64.zip`。目录版省去每次启动时解压运行库的开销，是默认推荐形式。
 
-```
-┌─────────────────────────────────────────┐
-│  PySide6 (Qt) 桌面应用                   │
-│  · 管理员权限检测 & 自动提权              │
-│  · 直接调用 Python 后端模块              │
-└─────────────┬───────────────────────────┘
-              │ 直接调用
-┌─────────────▼───────────────────────────┐
-│  后端模块 (Python)                       │
-│  · utils/network_adapter.py  网卡管理    │
-│  · utils/supplicant.py       进程控制    │
-│  · utils/hotspot.py          热点管理    │
-└─────────────┬───────────────────────────┘
-              │ PowerShell / netsh / WinRT
-┌─────────────▼───────────────────────────┐
-│  Windows 系统 API                        │
-└─────────────────────────────────────────┘
+1. 保留已安装的锐捷客户端和驱动，启动程序并接受管理员提示。
+2. 输入校园账号和密码，点击“连接校园网”。首次连接会校验、备份并安装兼容核心。
+3. 如果未发现客户端，在“设置”→“常规”中“自动查找”或“选择目录”。
+4. 在“设置”→“热点”选择连接校园网的有线接口。主界面可修改热点名称和密码，并开启或关闭热点。
+5. 如需自动连接，在常规设置中启用“运行后自动连接”和“登录 Windows 后自动启动”。
+
+默认热点名称为 `ovo`，默认密码为 `12345678`；已有设置优先。完整步骤和故障处理见 [使用说明](docs/user-guide.txt)。
+
+## 账号与热点边界
+
+“在本程序记住账号密码”将两字段一起交给 Windows 当前用户 DPAPI 加密。校园账号密码不写入本程序的普通设置文件或命令行；不记住时，下次启动需要重新输入，除非明确选择使用原客户端保存账号的兼容方式。
+
+原核心仍需自己的 DES 兼容配置，原生用户目录也保留可辨识的账号。因此清除本程序凭据不会删除原客户端记录，也不代表整个认证链路没有明文账号标识。普通设置文件包含热点密码，备份、配置和诊断记录不应公开。
+
+检测到唯一可用的 Clash/Mihomo TUN 时，热点选择该 TUN 作为共享来源；没有活动 TUN 时使用所选有线网络。验证支持经典 ICS 和本程序明确启动的现代 WinRT 会话，检查来源、私有网卡、地址和路由；已有热点不会因验证失败被自动替换或关闭。
+
+“热点已开启”是本机状态，手机是否获取地址并能访问网页仍需实际检查。不同 Windows 版本、驱动、网络策略和长期运行表现可能不同，不能保证服务器端不识别共享。实现细节见 [架构说明](docs/architecture.md)。
+
+## 从源码运行与构建
+
+需要 Windows x64、支持移动热点的无线网卡、Windows PowerShell，以及 Python 3.10 或更新版本。构建前请用 Git 克隆仓库：构建脚本会检查 Git 跟踪及待发布文件，发现本机路径、常见凭据或不应发布的文件时停止。源码运行和构建使用同一套依赖：
+
+```powershell
+python -m pip install -r requirements-oneclick.txt
+python campus_authenticator.py
 ```
 
-## 项目结构
+默认构建目录版和压缩包：
 
-```
-ruijie_helper/
-├── backend/
-│   └── server.py              # FastAPI 后端入口（供 Electron 版本使用）
-├── utils/
-│   ├── hotspot.py             # 热点管理（WinRT API）
-│   ├── supplicant.py          # 8021x 进程管理 + 配置
-│   └── network_adapter.py     # 网卡管理（netsh）
-├── electron/                  # Electron 版本前端
-│   ├── package.json           # Electron 项目配置
-│   ├── main.cjs               # Electron 主进程
-│   ├── preload.cjs            # IPC 桥接
-│   ├── build.bat              # 一键打包脚本
-│   └── src/                   # React 前端
-│       ├── App.tsx / App.css  # 主应用 + 全局样式
-│       ├── api.ts             # API 客户端
-│       ├── types.ts           # TypeScript 类型
-│       └── components/
-│           ├── Sidebar.tsx        # 侧边导航栏
-│           ├── SwitchButton.tsx   # 自定义滑动开关
-│           ├── HotspotPage.tsx    # 热点管理页
-│           └── NetworkPage.tsx    # 网卡控制页
-├── ui/                        # PySide6 版本前端
-│   ├── __init__.py
-│   └── main_window.py         # Qt 主窗口
-├── icon/
-│   ├── app.ico               # 程序图标
-│   └── ICON_BASE64.py        # 图标 Base64 源
-├── main.py                   # PySide6 版本启动入口
-└── requirements.txt
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build_authenticator.ps1
 ```
 
-## 功能介绍
+如确实需要单文件，可以使用下面的可选模式；单文件每次启动需要先展开依赖，通常更慢：
 
-- **网卡管理**
-  - 检测本地所有网络适配器的名称和启停状态。
-  - 一键启用/禁用指定网卡，使用滑动开关直观操作。
-  - 实时刷新 8021x.exe 进程路径，支持手动选择并启动该程序。
-
-- **8021x 进程控制**
-  - 监控 8021x.exe 运行状态（红色运行中 / 绿色未运行）。
-  - 结束进程并将可执行文件移动到指定目录；支持还原至原始路径。
-  - 仅保留最近一次移动记录，防止误操作。
-
-- **热点管理（WiFi Direct）**
-  - 通过 Windows 原生接口（PowerShell 调用 WinRT API）开启/关闭移动热点。
-  - 自定义热点名称（SSID）、密码、频段（2.4 GHz / 5 GHz），配置自动持久化。
-  - **保存配置后自动重启热点**以应用新参数。
-  - **频段切换已修复**：正确设置 Windows API 的 Band 属性。
-  - 热点成功开启后自动生成 WiFi 二维码，方便手机扫码连接。
-  - 滑动开关控制，切换时显示动画状态反馈。
-
-## 使用方法
-
-### 1. 直接下载运行（推荐）
-
-下载 `Release` 中的 `exe.zip`，解压到任意目录，双击 `校园网认证助手.exe` 即可运行。
-
-### 2. 从源码构建
-
-**环境要求：**
-- Python ≥ 3.9 + pip
-- Windows 10/11 x64
-
-#### Electron 版本（需额外安装 Node.js ≥ 18 + npm）
-
-```bash
-# 1. 安装 Python 依赖
-pip install -r requirements.txt
-
-# 2. 安装前端依赖
-cd electron
-npm install
-
-# 3. 一键打包（生成 exe/win-unpacked/）
-build.bat
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build_authenticator.ps1 -SingleFile
 ```
 
-#### PySide6 版本
+离线回归测试不需要真实校园账号，也不应改变网络：
 
-```bash
-# 1. 安装 Python 依赖
-pip install -r requirements.txt
-pip install PySide6
-
-# 2. 运行
-python main.py
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+python tools/audit_release.py
 ```
 
-### 3. 开发模式
+公开源码与文档不包含原厂客户端二进制、账号配置、真实现场报告或私人分析目录。安装时读取用户已有的受支持客户端，备份和恢复记录留在当前用户的数据目录中。
 
-#### Electron 版本
+## 保留的旧入口
 
-```bash
-# 终端 1：启动 Python 后端
-python backend/server.py
+`main.py` / `ui/` 是旧 PySide6 界面；`electron/` / `backend/` 是旧 Electron + FastAPI 界面，均不作为当前推荐入口。旧 Electron 仍需要 PATH 中的 Python 和预先安装的后端依赖，不会在每次启动时自动安装依赖。
 
-# 终端 2：启动前端开发服务器
-cd electron
-npm run dev
-```
-
-#### PySide6 版本
-
-```bash
-python main.py
-```
-
-## 常见问题
-1. 电脑开启热点后，手机端显示无网络
-> 在命令行输入
- ```bash
-ncpa.cpl
-```
-选择联网网卡设备---属性---共享家庭网络中选择**本地连接*10**
-
-> VPN的TUN模式创建的虚拟网卡会与热点网卡冲突，关闭TUN模式后再重新开启热点
-
-## 免责声明
-
-- 本程序仅供学习、研究及个人合法使用。
-- 严禁将本软件用于任何非法目的（包括但不限于未授权访问网络、干扰他人设备等）。
-- 使用者在下载、运行本软件时应遵守当地法律法规，并对自己的行为负责。
-- 开发者不对因使用本软件造成的任何直接或间接损失承担责任。
+开发旧 Electron 界面时，在安装依赖后使用 `npm run electron:dev`，由 Electron 启动后端。后端所有 API 都要求当前桌面会话的 Bearer 鉴权；临时令牌由 Electron 随机生成、通过子进程环境传入，并只由主进程代理请求附加。不要将后端作为无鉴权服务单独启动，不要在代码、文档或命令行中放置固定令牌。

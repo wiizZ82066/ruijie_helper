@@ -1,6 +1,8 @@
 """Run the compatibility-patched authentication core without terminating it."""
 from pathlib import Path
 import base64
+import configparser
+from datetime import datetime
 import json
 import subprocess
 import time
@@ -9,6 +11,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from utils.campus_connection import CampusConnectionManager
+from utils.auth_log import AuthLogObserver
 
 
 def same_path(first, second):
@@ -108,29 +111,66 @@ def _ethernet_has_internet(ethernet_adapter_guid: str) -> bool:
         return False  # An unavailable profile is not evidence of authentication.
 
 
+def _result_event_time(path, expected_result=None):
+    """Read only the timestamp of a result already validated by _fresh_result."""
+    try:
+        raw = path.read_bytes()
+        encodings = ("utf-16",) if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else (
+            ("utf-16-le",) if b"\x00" in raw[:80] else ("utf-8-sig", "gb18030"))
+        for encoding in encodings:
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeError:
+                continue
+        else:
+            return None
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read_string(text)
+        if expected_result is not None:
+            word = parser.get("Supplicant", "Result").strip().casefold()
+            actual = True if word == "succeed" else False if word in {"fail", "failed", "failure", "error"} else None
+            if actual is not expected_result:
+                return None
+        return datetime.strptime(parser.get("Supplicant", "Time"), "%Y-%m-%d %H:%M:%S").timestamp()
+    except (OSError, ValueError, configparser.Error):
+        return None
+
+
 def wait_authentication(client_dir: Path, before, started: float, cancel, timeout=120, session=None,
-                        ethernet_adapter_guid=None):
+                        ethernet_adapter_guid=None, log_before=None):
     end = time.monotonic() + timeout
     next_profile_check = 0.0
     saw_fresh_failure = False
+    saw_result_failure = False
+    latest_failure_time = None
+    latest_log_failure_time = None
+    observer = (AuthLogObserver(client_dir, log_before, max(started, session.created_at), pid=session.pid)
+                if log_before is not None and session is not None else None)
     while time.monotonic() < end:
         if cancel.is_set():
             return False
         path = client_dir / "SupplicantResult.ini"
+        file_current = True
         if session is not None:
             active = _running_core(client_dir / "8021x.exe")
             if active != session:
                 raise RuntimeError("认证核心进程已退出或被替换，未将旧认证结果视为本次成功。")
             try:
                 if path.stat().st_mtime_ns <= session.created_at * 1e9:
-                    cancel.wait(0.5)
-                    continue
+                    file_current = False
             except FileNotFoundError:
-                cancel.wait(0.5)
-                continue
-        result = CampusConnectionManager._fresh_result(path, before, max(started, session.created_at) if session else started)
-        if result is True:
-            return True
+                file_current = False
+        if not file_current and observer is None:
+            cancel.wait(0.5)
+            continue
+        result = (CampusConnectionManager._fresh_result(
+            path, before, max(started, session.created_at) if session else started) if file_current else None)
+        log_result = observer.poll() if observer is not None else None
+        log_time = observer.event_time if observer is not None else None
+        result_time = (_result_event_time(path, result) if observer is not None and
+                       (result is False or result is True and
+                        (log_result is False or latest_log_failure_time is not None)) else None)
         if result is False:
             # The native core may publish a temporary failure before its own
             # reconnect succeeds. Observe this session until success, timeout,
@@ -138,6 +178,45 @@ def wait_authentication(client_dir: Path, before, started: float, cancel, timeou
             # Once this attempt failed, an older success cannot rescue it even
             # if the result is temporarily absent during a later rewrite.
             saw_fresh_failure = True
+            saw_result_failure = True
+            latest_failure_time = result_time or latest_failure_time
+        if log_result is False:
+            saw_fresh_failure = True
+            if log_time is not None:
+                latest_log_failure_time = max(latest_log_failure_time or log_time, log_time)
+        elif log_result is True and log_time is not None and (
+                latest_log_failure_time is None or log_time >= latest_log_failure_time):
+            latest_log_failure_time = None
+        # The native AUTH_SUCCESS notification can leave Result.ini empty.
+        # Only new complete log records after the pre-launch baseline qualify.
+        # If two sources disagree, a success must be unambiguously newer than
+        # the failure (INI timestamps have only whole-second precision).
+        log_success = (log_result is True and log_time is not None and
+            latest_log_failure_time is None and
+            (not saw_result_failure or latest_failure_time is not None and log_time > latest_failure_time + 1))
+        if result is False:
+            log_success = bool(log_success and result_time is not None and log_time > result_time + 1)
+        result_success = result is True and (latest_log_failure_time is None or
+            result_time is not None and result_time > latest_log_failure_time)
+        if result_success:
+            if observer is not None and _running_core(client_dir / "8021x.exe") != session:
+                raise RuntimeError("认证核心进程已退出或被替换，未将旧认证结果视为本次成功。")
+            return True
+        if log_success:
+            if cancel.is_set():
+                return False
+            if _running_core(client_dir / "8021x.exe") != session:
+                raise RuntimeError("认证核心进程已退出或被替换，未将旧认证结果视为本次成功。")
+            # Include a final read so an appended failure/logoff while checking
+            # the process cannot be hidden by a previous success observation.
+            if observer.poll() is True:
+                final_result = CampusConnectionManager._fresh_result(
+                    path, before, max(started, session.created_at))
+                if final_result is not False:
+                    return True
+                final_time = _result_event_time(path, False)
+                if final_time is not None and observer.event_time > final_time + 1:
+                    return True
         # The service can authenticate before the delayed logon task opens this
         # UI. Reuse only this still-running session's success, with current
         # Internet connectivity on the explicitly selected physical Ethernet.

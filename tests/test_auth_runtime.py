@@ -1,6 +1,10 @@
 """Authentication-session regression tests; no real processes or network calls."""
 from pathlib import Path
+from contextlib import contextmanager, ExitStack
+from datetime import datetime
+import itertools
 import json
+import os
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -210,6 +214,183 @@ class AuthRuntimeTests(unittest.TestCase):
                     self.client_dir, None, 300.0, self.cancel, session=self.session)
             fresh.assert_called_once()
         self.spawn.assert_not_called()
+
+    @contextmanager
+    def log_observations(self, events, *, results=(None,), result_times=(None,), missing=False,
+                         sessions=None):
+        """Drive real wait logic with incremental observer states, never host logs.
+
+        A poll retains its last complete notification until another record arrives;
+        setting event_time with each poll models the actual observer contract.
+        """
+        def retain_last(values):
+            values = list(values)
+            return itertools.chain(values, itertools.repeat(values[-1]))
+
+        event_sequence = retain_last(events)
+        observer = Mock(spec=auth_runtime.AuthLogObserver)
+        observer.event_time = None
+
+        def poll():
+            state, observer.event_time = next(event_sequence)
+            return state
+
+        observer.poll.side_effect = poll
+        baseline = object()
+        with ExitStack() as stack:
+            constructor = stack.enter_context(patch.object(
+                auth_runtime, "AuthLogObserver", return_value=observer))
+            stack.enter_context(patch.object(auth_runtime.time, "monotonic",
+                                            side_effect=itertools.count(0, .5)))
+            active = stack.enter_context(patch.object(auth_runtime, "_running_core",
+                side_effect=retain_last(sessions or [self.session])))
+            stack.enter_context(patch.object(Path, "stat",
+                side_effect=FileNotFoundError if missing else None,
+                return_value=SimpleNamespace(st_mtime_ns=301_000_000_000)))
+            fresh = stack.enter_context(patch.object(auth_runtime.CampusConnectionManager,
+                "_fresh_result", side_effect=retain_last(results)))
+            timestamp = stack.enter_context(patch.object(auth_runtime, "_result_event_time",
+                side_effect=retain_last(result_times)))
+            connectivity = stack.enter_context(patch.object(auth_runtime, "_ethernet_has_internet"))
+            yield SimpleNamespace(observer=observer, constructor=constructor, active=active,
+                fresh=fresh, timestamp=timestamp, connectivity=connectivity,
+                wait=lambda: auth_runtime.wait_authentication(
+                    self.client_dir, None, 300.0, self.cancel, timeout=2,
+                    session=self.session, log_before=baseline), baseline=baseline)
+        self.spawn.assert_not_called()
+
+    def test_new_log_success_accepts_empty_or_missing_ini_for_same_session(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing), self.log_observations(
+                    [(True, 301.0)], missing=missing) as case:
+                self.assertTrue(case.wait())
+                case.constructor.assert_called_once_with(
+                    self.client_dir, case.baseline, 300.0, pid=self.session.pid)
+                self.assertEqual(case.observer.poll.call_count, 2)
+                self.assertEqual(case.active.call_count, 2)
+                case.connectivity.assert_not_called()
+
+    def test_log_failure_then_new_success_with_empty_ini_does_not_restart_core(self):
+        with self.log_observations([(False, 301.0), (True, 302.0)]) as case:
+            self.assertTrue(case.wait())
+            self.assertEqual(case.observer.poll.call_count, 3)
+            self.cancel.wait.assert_called_once_with(.5)
+            case.connectivity.assert_not_called()
+
+    def test_no_new_log_notification_times_out_without_reusing_old_success(self):
+        with self.log_observations([(None, None)]) as case:
+            self.assertFalse(case.wait())
+            self.assertEqual(case.observer.poll.call_count, 3)
+            self.assertEqual(self.cancel.wait.call_count, 3)
+            case.connectivity.assert_not_called()
+
+    def test_conflicting_sources_require_success_newer_than_failure(self):
+        cases = (
+            # INI, its timestamp, native notification, timestamp, expected.
+            (True, 301.0, False, 302.0, False),
+            (True, 302.0, False, 302.0, False),
+            (True, 303.0, False, 302.0, True),
+            (False, 302.0, True, 301.0, False),
+            (False, 302.0, True, 302.0, False),
+            (False, 301.0, True, 303.0, True),
+            # An unreadable failure time cannot prove ordering.
+            (False, None, True, 303.0, False),
+        )
+        for result, result_time, event, event_time, expected in cases:
+            with self.subTest(ini=result, ini_time=result_time, log=event,
+                              log_time=event_time), self.log_observations(
+                    [(event, event_time)], results=[result], result_times=[result_time]) as case:
+                self.assertIs(case.wait(), expected)
+                case.connectivity.assert_not_called()
+
+    def test_disappearing_ini_failure_cannot_be_rescued_by_older_log_success(self):
+        with self.log_observations([(None, None), (True, 301.0)],
+                                  results=[False, None], result_times=[302.0]) as case:
+            self.assertFalse(case.wait())
+
+    def test_later_log_success_can_follow_a_now_missing_ini_failure(self):
+        with self.log_observations([(None, None), (True, 304.0)],
+                                  results=[False, None], result_times=[302.0]) as case:
+            self.assertTrue(case.wait())
+
+    def test_core_replacement_during_log_success_verification_is_rejected(self):
+        replacement = auth_runtime.CoreSession(self.session.pid, 301.5)
+        with self.log_observations([(True, 301.0)],
+                                  sessions=[self.session, replacement]) as case:
+            with self.assertRaisesRegex(RuntimeError, "已退出或被替换"):
+                case.wait()
+            case.observer.poll.assert_called_once()
+
+    def test_cancel_between_log_success_and_verification_returns_false(self):
+        self.cancel.is_set.side_effect = [False, True]
+        with self.log_observations([(True, 301.0)]) as case:
+            self.assertFalse(case.wait())
+            case.observer.poll.assert_called_once()
+            case.active.assert_called_once()
+
+    def test_logoff_appended_during_final_verification_rejects_success(self):
+        with self.log_observations([(True, 301.0), (False, 302.0)]) as case:
+            self.assertFalse(case.wait())
+            self.assertGreaterEqual(case.observer.poll.call_count, 2)
+
+    def test_new_ini_failure_during_final_log_verification_rejects_success(self):
+        with self.log_observations([(True, 301.0)],
+                                  results=[None, False], result_times=[302.0]) as case:
+            self.assertFalse(case.wait())
+            self.assertGreaterEqual(case.fresh.call_count, 2)
+
+    def test_lost_log_continuity_during_final_verification_rejects_success(self):
+        with self.log_observations([(True, 301.0), (None, None)]) as case:
+            self.assertFalse(case.wait())
+
+    def test_lost_log_continuity_cannot_revive_ini_success_older_than_seen_log_failure(self):
+        with self.log_observations([(False, 302.0), (None, None)],
+                                  results=[True], result_times=[301.0]) as case:
+            self.assertFalse(case.wait())
+
+    def test_new_ini_success_can_follow_seen_log_failure_after_log_continuity_loss(self):
+        with self.log_observations([(False, 302.0), (None, None)],
+                                  results=[True], result_times=[301.0, 303.0]) as case:
+            self.assertTrue(case.wait())
+            self.cancel.wait.assert_called_once_with(.5)
+
+    def test_ini_rewrite_cannot_combine_old_success_with_new_failure_timestamp(self):
+        # Native Result.ini can be rewritten between the status read and source
+        # arbitration. Exercise actual bytes, hashes and times in a temp folder.
+        self.client_dir.mkdir()
+        path = self.client_dir / "SupplicantResult.ini"
+        started = datetime(2025, 1, 2, 12, 0, 0).timestamp()
+
+        def write_result(result, timestamp):
+            date = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            path.write_text(f"[Supplicant]\nResult={result}\nTime={date}\n", encoding="utf-8")
+            os.utime(path, (timestamp, timestamp))
+
+        write_result("Succeed", started + 1)
+        self.assertIs(auth_runtime.CampusConnectionManager._fresh_result(path, None, started), True)
+        observer = Mock(spec=auth_runtime.AuthLogObserver)
+        observer.event_time = started + 2
+
+        def poll():
+            write_result("Failed", started + 3)
+            return False
+
+        observer.poll.side_effect = poll
+        with patch.object(auth_runtime, "AuthLogObserver", return_value=observer), \
+             patch.object(auth_runtime, "_running_core", return_value=self.session), \
+             patch.object(auth_runtime.time, "monotonic", side_effect=itertools.count(0, .5)):
+            self.assertFalse(auth_runtime.wait_authentication(
+                self.client_dir, None, started, self.cancel, timeout=2,
+                session=self.session, log_before=object()))
+        self.spawn.assert_not_called()
+
+    def test_log_notifications_are_not_used_without_a_core_session(self):
+        with patch.object(auth_runtime, "AuthLogObserver") as observer, \
+             patch.object(auth_runtime.time, "monotonic", side_effect=[0, 0, 3]), \
+             patch.object(auth_runtime.CampusConnectionManager, "_fresh_result", return_value=None):
+            self.assertFalse(auth_runtime.wait_authentication(
+                self.client_dir, None, 300.0, self.cancel, timeout=2, log_before=object()))
+            observer.assert_not_called()
 
     def wait_with_existing_success(self, *, online=True, changed_session=False, changed_result=False):
         """An already authenticated service predates the GUI by a minute."""

@@ -676,6 +676,8 @@ class AuthWindow(QMainWindow):
         self.status.setText("正在连接…")
         self._hotspot_action = bool(value["auto_hotspot"])
         def job(log):
+            from utils.auth_log import capture_auth_log
+            log_before = capture_auth_log(client_dir)
             before, began = result_snapshot(client_dir), time.time()
             installer = CoreInstaller(client_dir, data_dir=DATA_DIR)
             current = installer.status()
@@ -694,14 +696,16 @@ class AuthWindow(QMainWindow):
                         type(prepared.get("started")) not in (int, float)):
                     raise RuntimeError("账号登录准备未完成，未继续连接。")
                 before, began = prepared["before"], prepared["started"]
+                log_before = prepared.get("log_before")
             session = start_core(client_dir, log)
             if credentials is None and not value["auto_hotspot"]:
                 return {"message": "请在登录窗口完成连接"}
             log("等待认证结果…")
             if not wait_authentication(client_dir, before, began, self._cancel, session=session,
-                                       ethernet_adapter_guid=None if credentials is not None else value["ethernet_guid"]):
+                                       ethernet_adapter_guid=None if credentials is not None else value["ethernet_guid"],
+                                       log_before=log_before):
                 log("认证核心保持运行；未取得认证成功结果，暂未自动开启热点。")
-                return {"message": "等待登录完成"}
+                return {"message": "认证结果暂未确认，请在设置中查看运行记录"}
             if not value["auto_hotspot"]:
                 return {"message": "已连接校园网"}
             result = self._start_hotspot(value, log)

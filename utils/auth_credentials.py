@@ -285,6 +285,7 @@ def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _
     """
     from utils.core_install import CoreInstaller, InstallOperations
     from utils.auth_runtime import CoreSession, _running_core, result_snapshot, start_core
+    from utils.auth_log import capture_auth_log
 
     client_dir = Path(client_dir).resolve()
     data_dir = Path(data_dir) if data_dir is not None else Path(os.environ.get("APPDATA", str(Path.home()))) / "CampusLogin"
@@ -328,6 +329,7 @@ def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _
                     installer._atomic_write(path, content)
                     if path.read_bytes() != content:
                         raise CredentialPreparationError("写入的认证配置校验失败。")
+                log_before = capture_auth_log(client_dir)
                 before, started = result_snapshot(client_dir), time.time()
                 journal["phase"] = "profile_prepared"
                 installer._save_journal(journal)
@@ -343,7 +345,7 @@ def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _
                 journal["phase"] = "complete"
                 installer._save_journal(journal)
                 installer._emit(log, "账号已通过原客户端兼容格式交给认证核心，正在等待新的认证结果。")
-                return {"before": before, "started": started}
+                return {"before": before, "started": started, "log_before": log_before}
             except Exception:
                 rollback_failed = False
                 # A partially restarted service must be stopped before restoring

@@ -1,2 +1,3 @@
 -r requirements-oneclick.txt
+-r requirements-flet.txt
 httpx>=0.27

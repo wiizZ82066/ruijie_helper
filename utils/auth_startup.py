@@ -6,12 +6,13 @@ import subprocess
 import sys
 
 
-def set_startup(enabled: bool):
+def set_startup(enabled: bool, *, entry_script=None):
     if getattr(sys, "frozen", False):
         executable, arguments = sys.executable, "--connect --minimized"
     else:
         executable = sys.executable
-        arguments = subprocess.list2cmdline([str(Path(__file__).resolve().parents[1] / "campus_authenticator.py"), "--connect", "--minimized"])
+        entry = Path(entry_script).resolve() if entry_script is not None else Path(__file__).resolve().parents[1] / "campus_authenticator.py"
+        arguments = subprocess.list2cmdline([str(entry), "--connect", "--minimized"])
     script = r'''$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $data=[Console]::In.ReadToEnd() | ConvertFrom-Json

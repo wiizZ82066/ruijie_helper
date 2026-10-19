@@ -160,6 +160,85 @@ def encrypt_native_password(password: str, material: bytes) -> str:
     return DES.new(material[:8], DES.MODE_CBC, iv=material[8:]).encrypt(padded).hex().upper()
 
 
+def _verify_import_core(client_dir: Path):
+    """Accept only the reviewed original or its exact compatible patch."""
+    raw = (client_dir / "8021x.exe").read_bytes()
+    original = bytearray(raw)
+    for item in core_patch.PATCHES:
+        if original[item.offset:item.offset + len(item.replacement)] == item.replacement:
+            original[item.offset:item.offset + len(item.replacement)] = item.expected[:len(item.replacement)]
+    patched, _ = core_patch.patch_bytes(bytes(original))
+    if raw not in (bytes(original), patched):
+        raise CredentialPreparationError("此客户端版本暂不支持账号导入。")
+
+
+def _read_import_profile(path: Path) -> bytes:
+    if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+        raise CredentialPreparationError("原客户端配置路径异常，未导入。")
+    with path.open("rb") as stream:
+        raw = stream.read(_MAX_PROFILE + 1)
+    if not raw or len(raw) > _MAX_PROFILE:
+        raise CredentialPreparationError("原客户端配置为空或大小异常，未导入。")
+    return raw
+
+
+def _decrypt_saved_password(cipher: str, material: bytes) -> str:
+    """Decode the reviewed native format in memory; never return raw bytes/errors."""
+    try:
+        if len(material) != 16 or not re.fullmatch(r"(?:[0-9a-fA-F]{16}){1,16}", cipher):
+            raise ValueError()
+        from Crypto.Cipher import DES
+        plain = DES.new(material[:8], DES.MODE_CBC, iv=material[8:]).decrypt(bytes.fromhex(cipher))
+        value, separator, padding = plain.partition(b"\0")
+        if not value or (separator and (len(padding) > 6 or any(padding))):
+            raise ValueError()
+        password = value.decode("mbcs" if os.name == "nt" else "cp936", errors="strict")
+        if any(ord(c) < 32 or ord(c) == 127 for c in password) or _native_bytes(password) != value:
+            raise ValueError()
+        if encrypt_native_password(password, material).casefold() != cipher.casefold():
+            raise ValueError()
+        return password
+    except Exception:
+        raise CredentialPreparationError("无法读取锐捷保存的密码，请在本机原客户端重新保存，或手动输入。") from None
+
+
+def read_saved_credentials(client_dir: Path, *, material_provider=None) -> Credentials:
+    """Read only the selected native account. No enumeration, login or file writes.
+
+    DES has no authenticity tag: structural checks detect malformed data, but
+    only a later successful authentication verifies that the password is valid.
+    """
+    try:
+        client_dir = Path(client_dir).resolve()
+        _verify_import_core(client_dir)
+        users = client_dir / "users"
+        if users.is_symlink() or getattr(users, "is_junction", lambda: False)():
+            raise CredentialPreparationError("原客户端配置路径异常，未导入。")
+        global_path = client_dir / "SuConfig.dat"
+        global_raw = _read_import_profile(global_path)
+        username = _get(_text(global_raw), "PUBLIC", "Name")
+        if (not username or len(_native_bytes(username)) > 128 or
+                any(ord(c) < 32 or c in "[];=" for c in username)):
+            raise CredentialPreparationError("锐捷未保存可导入的当前账号，请先在原客户端保存账号。")
+        user_path = _user_path(client_dir, username)
+        user_raw = _read_import_profile(user_path)
+        profile = _text(user_raw)
+        cipher = _get(profile, "PUBLIC", "Password")
+        if not cipher or _get(profile, "PUBLIC", "SaveCheck", "1") != "1":
+            raise CredentialPreparationError("锐捷未保存当前账号的密码，请先在原客户端记住密码。")
+        material = (material_provider or _machine_material)()
+        password = _decrypt_saved_password(cipher, material)
+        if (_read_import_profile(global_path) != global_raw or
+                _read_import_profile(user_path) != user_raw):
+            raise CredentialPreparationError("锐捷账号配置正在变化，请稍后重新导入。")
+        return Credentials(username, password)
+    except CredentialPreparationError:
+        raise
+    except Exception:
+        # Filesystem errors can contain an account-named path. Never expose it.
+        raise CredentialPreparationError("无法读取锐捷保存的账号，请检查客户端目录及版本，或手动输入。") from None
+
+
 def _machine_material() -> bytes:
     """Reproduce 0x467094/0x467590/0x4ba25e; read-only IDENTIFY requests.
 

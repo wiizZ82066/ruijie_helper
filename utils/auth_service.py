@@ -29,15 +29,18 @@ from utils.hotspot import HotspotManager
 from utils.network_diagnostics import collect_network_diagnostics
 
 try:
-    from utils.auth_credentials import prepare_credentials
+    from utils.auth_credentials import prepare_credentials, read_saved_credentials
 except ImportError:
     prepare_credentials = None
+    read_saved_credentials = None
 
 
 DEFAULT_SETTINGS = {
     "client_dir": "", "auto_login": True, "auto_hotspot": False,
     "ethernet_guid": None, "ssid": "ovo", "hotspot_key": "12345678",
     "band": "2.4GHz", "legacy_saved_login": False,
+    "connection_mode": "auto",
+    "wired_backend": "independent", "wired_service": "internet",
 }
 
 _STARTUP_QUERY = r'''$ErrorActionPreference='Stop'
@@ -90,6 +93,9 @@ class CampusService:
         self._secrets_lock = threading.RLock()
         self._login_secrets = set()
         self._hotspot_keys = set()
+        self._wireless_session = None
+        self._wireless_next_keepalive = 0.0
+        self._wired_session = None
 
     def _remember(self, values=None, credentials=None):
         with self._secrets_lock:
@@ -130,6 +136,12 @@ class CampusService:
                     valid = False
             elif name == "band":
                 valid = value in ("2.4GHz", "5GHz", "自动")
+            elif name == "connection_mode":
+                valid = value in ("wired", "wireless", "auto")
+            elif name == "wired_backend":
+                valid = value in ("independent", "native")
+            elif name == "wired_service":
+                valid = isinstance(value,str) and value.isascii() and 1<=len(value)<=32 and all(ord(c)>=32 for c in value)
             if not valid:
                 if strict:
                     raise ValueError("设置字段格式无效：" + name)
@@ -162,7 +174,7 @@ class CampusService:
         with self._settings_lock:
             result = self._settings(values, strict=True, base=self.load_settings())
             HotspotManager._validate_credentials(result["ssid"], result["hotspot_key"])
-            if (require_hotspot or result["auto_hotspot"]) and not result["ethernet_guid"]:
+            if (require_hotspot or (result["auto_hotspot"] and result["connection_mode"] == "wired")) and not result["ethernet_guid"]:
                 raise ValueError("请在设置中选择热点使用的有线网络。")
             self._write_settings(result)
         return result
@@ -178,12 +190,60 @@ class CampusService:
             with self._secrets_lock:
                 self._login_secrets.clear()
 
+    @_safe_errors
+    def import_credentials(self, values) -> Credentials:
+        with self._operation_lock:
+            # Retain the existing vault when it cannot be unlocked.
+            self.load_credentials()
+            if read_saved_credentials is None:
+                raise RuntimeError("此版本暂不支持账号导入，请更新后再试。")
+            client_dir = self._require_client(values)
+            credentials = read_saved_credentials(client_dir)
+            self._remember(credentials=credentials)
+            self.credential_store.save(credentials, remember=True)
+            try:
+                with self._settings_lock:
+                    current = self.load_settings()
+                    current.update(client_dir=str(client_dir), legacy_saved_login=False)
+                    self._write_settings(current)
+            except Exception:
+                raise RuntimeError("账号已加密保存，但登录方式设置未保存，请重试导入。") from None
+            return credentials
+
     def discover_client(self, saved_path=None):
         return discover_client_dir(saved_path)
 
     def list_adapters(self):
         return [item for item in WindowsOperations().list_adapters()
-                if item.get("if_type") == 6 and item.get("hardware_interface") is True]
+                if item.get("if_type") == 6 and item.get("hardware_interface") is True
+                and not any(token in str(item.get("interface_description", "")).upper()
+                            for token in ("RNDIS", "REMOTE NDIS", "APPLE MOBILE DEVICE"))]
+
+    def connection_target(self, values):
+        """Read only; no global online state and no HTTP or credential access."""
+        mode = values.get("connection_mode", "wired")
+        if mode not in ("wired", "wireless", "auto"):
+            raise ValueError("连接方式无效。")
+        if mode != "wireless":
+            up = [r for r in self.list_adapters() if r.get("status") == "Up" and
+                  r.get("if_type") == 6 and r.get("hardware_interface") is True]
+            selected = values.get("ethernet_guid")
+            if mode == "auto" and up:
+                # Keep an available previous interface, otherwise choose a
+                # stable physical interface. Never pin a removed USB adapter.
+                up.sort(key=lambda r: (r.get('guid') != selected, str(r.get('guid', ''))))
+                return ("wired", up[0]["guid"])
+            if selected:
+                up = [r for r in up if r.get("guid") == selected]
+            if len(up) > 1:
+                return ("ambiguous", "")
+            if up:
+                return ("wired", up[0]["guid"])
+            if mode == "wired":
+                return ("unplugged", "")
+        from utils.wireless_network import current_jnu
+        guids = current_jnu()
+        return ("wireless", ",".join(sorted(guids)))
 
     def _require_client(self, values):
         saved = values.get("client_dir", "")
@@ -218,12 +278,14 @@ class CampusService:
         if type(enabled) is not bool:
             raise ValueError("自启动选项格式无效。")
         with self._operation_lock:
-            if enabled:
+            if enabled and values.get("connection_mode", "wired") == "wired" and values.get("wired_backend", "independent") == "native":
                 client_dir = self._require_client(values)
                 current = CoreInstaller(client_dir, data_dir=self.data_dir).status()
                 if current.get("state") != "patched" or current.get("recovery_needed"):
                     raise RuntimeError("请先成功连接一次，再开启登录自启动。")
                 self.save_settings(dict(values, client_dir=str(client_dir)))
+            elif enabled:
+                self.save_settings(values)
             return configure_startup(enabled, entry_script=self.entry_script)
 
     @staticmethod
@@ -231,22 +293,55 @@ class CampusService:
         return {"message": "已取消等待，认证核心保持当前状态", "authenticated": False, "ready": False}
 
     @_safe_errors
-    def connect(self, values, credentials, remember, cancel, log) -> dict:
+    def connect(self, values, credentials, remember, cancel, log, *, require_ethernet=False) -> dict:
         self._remember(values, credentials)
         emit = self._logger(log)
         cancel = cancel if cancel is not None else threading.Event()
         with self._operation_lock:
             if cancel.is_set():
                 return self._cancelled()
-            if values.get("legacy_saved_login", False):
-                credentials = None
+            mode = values.get("connection_mode", "wired")
+            if mode not in ("wired", "wireless", "auto"):
+                raise ValueError("连接方式无效。")
+            if mode != "wired":
+                target, guid = self.connection_target(values)
+                if target == "ambiguous":
+                    raise ValueError("检测到多张有线网卡，请先在设置中选择。")
+                if target == "wireless":
+                    return self._connect_wireless(values, credentials, remember, cancel, emit)
+                values = dict(values, ethernet_guid=guid)
+                require_ethernet = True
+            if require_ethernet:
+                rows = self.list_adapters()
+                connected = [row for row in rows if row.get("if_type") == 6 and
+                             row.get("hardware_interface") is True and row.get("status") == "Up"]
+                selected = values.get("ethernet_guid")
+                if selected:
+                    connected = [row for row in connected if row.get("guid") == selected]
+                if len(connected) != 1:
+                    return {"message": "未检测到可用的有线连接，已跳过自动认证" if not connected else
+                            "检测到多张有线网卡，请选择后手动连接", "authenticated": False,
+                            "ready": False, "skipped": True}
+                values = dict(values, ethernet_guid=connected[0]["guid"])
+                if cancel.is_set():
+                    return self._cancelled()
+            self._wireless_session = None
+            if values.get('wired_backend', 'independent') == 'independent':
+                return self._connect_independent(values, credentials, remember, cancel, emit)
+            self._close_wired()
+            native_saved = bool(values.get("legacy_saved_login", False))
+            client_dir = self._require_client(values)
+            if native_saved:
+                if read_saved_credentials is None:
+                    raise RuntimeError("此版本暂不支持读取锐捷保存的账号，请更新后再试。")
+                credentials = read_saved_credentials(client_dir)
+                self._remember(credentials=credentials)
             elif not isinstance(credentials, Credentials):
                 raise ValueError("请输入校园账号和密码。")
             if credentials is not None and prepare_credentials is None:
                 raise RuntimeError("此版本尚未支持账号登录，请更新后再试。")
-            client_dir = self._require_client(values)
             value = self.save_settings(dict(values, client_dir=str(client_dir)))
-            if credentials is not None:
+            if not native_saved:
                 self.credential_store.save(credentials, remember=remember)
             log_before = capture_auth_log(client_dir)
             before, began = result_snapshot(client_dir), time.time()
@@ -275,8 +370,6 @@ class CampusService:
             session = start_core(client_dir, emit)
             if not isinstance(session, CoreSession) or (credentials is not None and session.created_at < began):
                 raise RuntimeError("未能确认本次账号配置对应的认证会话。")
-            if credentials is None and not value["auto_hotspot"]:
-                return {"message": "请在登录窗口完成连接", "authenticated": False, "ready": False}
             emit("等待认证结果…")
             if not wait_authentication(client_dir, before, began, cancel, session=session,
                                        ethernet_adapter_guid=None if credentials is not None else value["ethernet_guid"],
@@ -294,6 +387,111 @@ class CampusService:
             result["message"] = "已连接校园网" if result["ready"] else (
                 "已连接，热点共享未就绪" if result["hotspot"] else "已连接，热点未能开启")
             return result
+
+    def _close_wired(self):
+        if self._wired_session is not None:
+            self._wired_session.close()
+            self._wired_session = None
+
+    def _connect_independent(self, values, credentials, remember, cancel, emit):
+        from utils.wired_auth import WiredClient
+        rows=[r for r in self.list_adapters() if r.get('status')=='Up']
+        selected=values.get('ethernet_guid')
+        if selected:
+            rows=[r for r in rows if str(r['guid']).casefold()==str(selected).casefold()]
+        if len(rows)!=1:
+            raise ValueError('请插入网线并选择一张实体有线网卡。')
+        if values.get('legacy_saved_login'):
+            if read_saved_credentials is None:
+                raise RuntimeError('暂不支持导入原客户端账号，请手动输入。')
+            credentials=read_saved_credentials(self._require_client(values))
+            self._remember(credentials=credentials)
+        if not isinstance(credentials,Credentials):
+            raise ValueError('请输入校园账号和密码。')
+        value=self.save_settings(dict(values,ethernet_guid=rows[0]['guid']))
+        if not values.get('legacy_saved_login'):
+            self.credential_store.save(credentials,remember=remember)
+        self._close_wired()
+        client=WiredClient(rows[0]['guid'],value['wired_service'])
+        self._wired_session=client
+        try:
+            result=client.connect(credentials,cancel,emit)
+        except BaseException:
+            client.close()
+            self._wired_session=None
+            raise
+        if result.get('ready') and value['auto_hotspot']:
+            hotspot=self._start_hotspot(value,emit,cancel=cancel)
+            result.update(hotspot=hotspot.get('hotspot'))
+            if not hotspot.get('ready'):
+                result['message']='已连接校园网，热点共享未就绪'
+        return result
+
+    def wired_status(self):
+        client=self._wired_session
+        return client.snapshot() if client is not None else None
+
+    @_safe_errors
+    def disconnect(self):
+        with self._operation_lock:
+            self._close_wired()
+            return {'connection_kind':'wired','authenticated':False,'ready':False,
+                    'active':False,'message':'已断开校园网'}
+
+    def close(self):
+        with self._operation_lock:
+            self._close_wired()
+            self._wireless_session=None
+
+    def _connect_wireless(self, values, credentials, remember, cancel, emit):
+        self._close_wired()
+        from utils.wireless_network import ensure_jnu, current_jnu
+        from utils.interface_http import InterfaceHTTP
+        from utils.jnu_portal import PortalClient
+        emit("正在检查并连接 JNU 无线网络…")
+        binding = ensure_jnu(cancel)
+        if cancel.is_set():
+            return self._cancelled()
+        native_saved = bool(values.get("legacy_saved_login", False))
+        if native_saved:
+            if read_saved_credentials is None:
+                raise RuntimeError("此版本暂不支持读取锐捷保存的账号。")
+            credentials = read_saved_credentials(self._require_client(values))
+            self._remember(credentials=credentials)
+        elif not isinstance(credentials, Credentials):
+            raise ValueError("请输入校园账号和密码。")
+        # Reading the old profile is optional. No native core install/start,
+        # profile writes, process patching, or session attachment happens here.
+        self.save_settings(values)
+        if not native_saved:
+            self.credential_store.save(credentials, remember=remember)
+        http = InterfaceHTTP(binding.index, binding.address, binding.dns, cancel)
+        client = PortalClient(http, cancel, lambda: binding.guid.upper() in
+                              {g.upper() for g in current_jnu()})
+        self._wireless_session = None
+        result = client.connect(credentials, emit)
+        if client.keepalive_seconds > 0 and client.session_index:
+            self._wireless_session = client
+            self._wireless_next_keepalive = time.monotonic() + client.keepalive_seconds
+        if values.get("auto_hotspot"):
+            emit("无线连接已完成；自动热点仅在有线连接成功后开启。")
+        return result
+
+    @_safe_errors
+    def maintain_wireless(self):
+        """Only the server-requested heartbeat; never retry credentials here."""
+        with self._operation_lock:
+            client = self._wireless_session
+            if client is None or time.monotonic() < self._wireless_next_keepalive:
+                return None
+            try:
+                if not client.keepalive():
+                    raise RuntimeError("JNU 在线状态未确认，请重新连接。")
+            except Exception:
+                self._wireless_session = None
+                raise
+            self._wireless_next_keepalive = time.monotonic() + client.keepalive_seconds
+            return None
 
     def _start_hotspot(self, values, emit, *, cancel=None):
         with self._hotspot_lock:

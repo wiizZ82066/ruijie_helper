@@ -44,7 +44,8 @@ class AuthServiceTests(unittest.TestCase):
         self.store.load.return_value = None
         self.service = auth_service.CampusService(self.root / "user data", self.root / "source frontend.py")
         self.values = dict(auth_service.DEFAULT_SETTINGS, client_dir=str(self.root / "mock client"),
-                           ethernet_guid=GUID, ssid="Synthetic hotspot", hotspot_key=KEY)
+                           ethernet_guid=GUID, ssid="Synthetic hotspot", hotspot_key=KEY,
+                           connection_mode="wired", wired_backend="native")
         self.credentials = Credentials(ACCOUNT, PASSWORD)
         self.logs = []
         self.cancel = threading.Event()
@@ -83,6 +84,35 @@ class AuthServiceTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("offline_auth_service_import", auth_service.__file__)
         with patch("builtins.__import__", side_effect=guarded):
             spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+    def test_import_saves_dpapi_and_disables_legacy_without_touching_network(self):
+        self.service.save_settings(dict(self.values, legacy_saved_login=True))
+        reader = self.mocked("utils.auth_service.read_saved_credentials", return_value=self.credentials)
+        result = self.service.import_credentials(self.values)
+        self.assertIs(result, self.credentials)
+        reader.assert_called_once_with(Path(self.values["client_dir"]).resolve())
+        self.store.save.assert_called_once_with(self.credentials, remember=True)
+        self.assertFalse(self.service.load_settings()["legacy_saved_login"])
+        self.assertNotIn(ACCOUNT, self.service.settings_path.read_text(encoding="utf-8"))
+        self.prepare.assert_not_called()
+        self.installer.install.assert_not_called()
+        self.start.assert_not_called()
+        self.hotspot_start.assert_not_called()
+
+    def test_import_preserves_locked_vault_and_does_not_read_native_profile(self):
+        self.store.load.side_effect = CredentialUnlockError("无法解锁")
+        reader = self.mocked("utils.auth_service.read_saved_credentials")
+        with self.assertRaises(CredentialUnlockError):
+            self.service.import_credentials(self.values)
+        reader.assert_not_called()
+        self.store.save.assert_not_called()
+
+    def test_failed_native_import_does_not_replace_existing_credentials(self):
+        self.mocked("utils.auth_service.read_saved_credentials", side_effect=ValueError("未保存密码"))
+        with self.assertRaisesRegex(ValueError, "未保存密码"):
+            self.service.import_credentials(self.values)
+        self.store.save.assert_not_called()
+        self.assertFalse(self.service.settings_path.exists())
 
     def test_defaults_and_load_whitelist_never_include_account_fields(self):
         self.assertEqual(self.service.load_settings(), auth_service.DEFAULT_SETTINGS)
@@ -190,21 +220,82 @@ class AuthServiceTests(unittest.TestCase):
             self.connect()
         self.wait_auth.assert_not_called()
 
-    def test_legacy_manual_login_does_not_claim_authenticated_and_does_not_prepare(self):
+    def test_legacy_saved_login_prepares_credentials_and_waits_for_new_session(self):
+        reader = self.mocked("utils.auth_service.read_saved_credentials", return_value=self.credentials)
         result = self.service.connect(dict(self.values, legacy_saved_login=True), None, False, self.cancel, self.logs.append)
-        self.assertFalse(result["authenticated"])
-        self.assertFalse(result["ready"])
-        self.prepare.assert_not_called()
+        self.assertTrue(result["authenticated"])
+        self.assertTrue(result["ready"])
+        reader.assert_called_once()
+        self.assertEqual(self.prepare.call_args.args[1], self.credentials)
         self.store.save.assert_not_called()
         self.start.assert_called_once()
-        self.wait_auth.assert_not_called()
+        self.assertEqual(self.wait_auth.call_args.args[1:3], ("new-account-baseline", 200.0))
+        self.assertIsNone(self.wait_auth.call_args.kwargs["ethernet_adapter_guid"])
 
-    def test_legacy_auto_hotspot_requires_verified_session_and_selected_ethernet(self):
+    def test_legacy_auto_hotspot_requires_fresh_authentication(self):
+        self.mocked("utils.auth_service.read_saved_credentials", return_value=self.credentials)
         self.service.connect(dict(self.values, legacy_saved_login=True, auto_hotspot=True),
                              None, False, self.cancel, self.logs.append)
-        self.assertEqual(self.wait_auth.call_args.kwargs["ethernet_adapter_guid"], GUID)
+        self.assertIsNone(self.wait_auth.call_args.kwargs["ethernet_adapter_guid"])
         self.assertIs(self.wait_auth.call_args.kwargs["session"], self.session)
         self.hotspot_start.assert_called_once()
+
+    def test_missing_native_password_fails_before_any_authentication_changes(self):
+        self.mocked("utils.auth_service.read_saved_credentials", side_effect=RuntimeError("锐捷未保存密码"))
+        with self.assertRaisesRegex(RuntimeError, "未保存密码"):
+            self.service.connect(dict(self.values, legacy_saved_login=True), None, False, self.cancel, self.logs.append)
+        self.prepare.assert_not_called()
+        self.installer.install.assert_not_called()
+        self.start.assert_not_called()
+        self.assertFalse(self.service.settings_path.exists())
+
+    def test_automatic_connect_skips_without_physical_ethernet_before_reading_credentials(self):
+        reader = self.mocked("utils.auth_service.read_saved_credentials", return_value=self.credentials)
+        selected = dict(guid=GUID, if_type=6, hardware_interface=True, status="Up")
+        for rows in [[], [dict(selected, status="Down")], [dict(selected, hardware_interface=False)],
+                     [dict(selected, if_type=71)], [dict(selected, guid="another-interface")]]:
+            with self.subTest(rows=rows), patch.object(self.service, "list_adapters", return_value=rows):
+                result = self.service.connect(dict(self.values, legacy_saved_login=True), None, False,
+                    self.cancel, self.logs.append, require_ethernet=True)
+                self.assertTrue(result["skipped"])
+                self.assertFalse(result["authenticated"])
+        reader.assert_not_called()
+        self.store.save.assert_not_called()
+        self.installer.install.assert_not_called()
+        self.start.assert_not_called()
+        self.assertFalse(self.service.settings_path.exists())
+
+    def test_automatic_connect_uses_unique_up_ethernet_and_then_authenticates(self):
+        selected = dict(guid=GUID, if_type=6, hardware_interface=True, status="Up")
+        with patch.object(self.service, "list_adapters", return_value=[selected]):
+            result = self.service.connect(dict(self.values, ethernet_guid=None), self.credentials, True,
+                self.cancel, self.logs.append, require_ethernet=True)
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(self.service.load_settings()["ethernet_guid"], GUID)
+
+    def test_automatic_connect_does_not_guess_between_two_ethernet_connections(self):
+        rows = [dict(guid=guid, if_type=6, hardware_interface=True, status="Up")
+                for guid in (GUID, "22222222-2222-4222-8222-222222222222")]
+        with patch.object(self.service, "list_adapters", return_value=rows):
+            result = self.service.connect(dict(self.values, ethernet_guid=None), self.credentials, True,
+                self.cancel, self.logs.append, require_ethernet=True)
+        self.assertTrue(result["skipped"])
+        self.start.assert_not_called()
+
+    def test_adapter_probe_failure_or_cancellation_cannot_start_authentication(self):
+        with patch.object(self.service, "list_adapters", side_effect=RuntimeError("网卡读取失败")):
+            with self.assertRaisesRegex(RuntimeError, "网卡读取失败"):
+                self.service.connect(self.values, self.credentials, True, self.cancel,
+                                     self.logs.append, require_ethernet=True)
+        def adapters():
+            self.cancel.set()
+            return [dict(guid=GUID, if_type=6, hardware_interface=True, status="Up")]
+        with patch.object(self.service, "list_adapters", side_effect=adapters):
+            result = self.service.connect(self.values, self.credentials, True, self.cancel,
+                                          self.logs.append, require_ethernet=True)
+        self.assertFalse(result["authenticated"])
+        self.store.save.assert_not_called()
+        self.start.assert_not_called()
 
     def test_failed_authentication_keeps_core_and_never_opens_hotspot(self):
         self.wait_auth.return_value = False

@@ -39,7 +39,7 @@ class GatedRead:
         self.finished = threading.Event()
         self.value, self.error = value, error
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
         self.entered.set()
         try:
             if not self.release.wait(timeout=3):
@@ -52,6 +52,31 @@ class GatedRead:
 
 
 class FletUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_independent_status_disconnect_and_shared_labels(self):
+        state={'connection_kind':'wired','active':True,'authenticated':True,'ready':True,'message':'已连接校园网 · 独立有线认证'}
+        self.ui._apply_wired_status(state)
+        self.assertEqual(self.ui.connect_button.content,'断开校园网')
+        self.assertEqual(self.ui.status.value,self.ui.notice.value)
+        self.service.disconnect.return_value=dict(state,active=False,authenticated=False,ready=False,message='已断开校园网')
+        await self.ui.connect()
+        self.service.disconnect.assert_called_once()
+        self.service.connect.assert_not_called()
+        self.assertIsNone(self.ui.connection_inputs)
+        self.assertEqual(self.ui.connect_button.content,'连接校园网')
+        self.assertEqual(self.ui.notice.value,'已断开校园网')
+
+    async def test_background_wired_failure_clears_connected_button(self):
+        self.ui._apply_wired_status({'active':True,'message':'已连接校园网'})
+        self.ui._apply_wired_status({'active':False,'message':'有线连接已断开'})
+        self.assertFalse(self.ui.wired_active)
+        self.assertEqual(self.ui.status.value,self.ui.notice.value)
+        self.assertEqual(self.ui.connect_button.content,'连接校园网')
+
+    async def test_independent_default_is_saved_without_client_directory(self):
+        self.assertEqual(self.ui.values()['wired_backend'],'independent')
+        self.assertEqual(self.ui.values()['wired_service'],'internet')
+        self.assertEqual(self.ui.values()['client_dir'],'')
+
     async def asyncSetUp(self):
         self.patchers = []
         for target in ("subprocess.run", "subprocess.Popen", "ctypes.WinDLL", "psutil.Process",
@@ -85,6 +110,34 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 4)
         for patcher in reversed(self.patchers):
             patcher.stop()
+
+    async def test_import_fills_masked_credentials_and_synchronizes_status(self):
+        self.service.import_credentials.return_value = Credentials(ACCOUNT, PASSWORD)
+        self.ui.legacy.value = True
+        self.ui.credential_error = True
+        await self.ui.import_credentials()
+        self.assertEqual(self.ui.username.value, ACCOUNT)
+        self.assertEqual(self.ui.password.value, PASSWORD)
+        self.assertTrue(self.ui.password.password)
+        self.assertTrue(self.ui.remember.value)
+        self.assertFalse(self.ui.legacy.value)
+        self.assertFalse(self.ui.credential_error)
+        self.assertEqual(self.ui.status.value, self.ui.notice.value)
+        self.assertNotIn(PASSWORD, self.ui.log_view.value or "")
+        self.assertFalse(self.ui.progress.visible)
+        self.service.connect.assert_not_called()
+        # A credential read started before import cannot overwrite its result.
+        self.ui._apply_credentials((Credentials("old-demo", "old-password"), False))
+        self.assertEqual(self.ui.password.value, PASSWORD)
+
+    async def test_failed_import_retains_existing_fields(self):
+        self.ui.username.value, self.ui.password.value = ACCOUNT, PASSWORD
+        self.service.import_credentials.side_effect = RuntimeError("锐捷未保存密码")
+        await self.ui.import_credentials()
+        self.assertEqual(self.ui.username.value, ACCOUNT)
+        self.assertEqual(self.ui.password.value, PASSWORD)
+        self.assertIn("未保存密码", self.ui.status.value)
+        self.assertFalse(self.ui.import_button.disabled)
 
     def gate(self, *args, **kwargs):
         gate = GatedRead(*args, **kwargs)
@@ -152,9 +205,7 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         fields = self.ui.username, self.ui.password, self.ui.ssid, self.ui.key
         self.ui.ssid.value, self.ui.key.value = "Synthetic edited hotspot", "edited-key-123"
         home = self.ui.body.content
-        responsive = [control for control in home.controls if isinstance(control, ft.ResponsiveRow)]
-        self.assertEqual(len(responsive), 1)
-        self.assertEqual(len(responsive[0].controls), 2)
+        self.assertFalse(any(isinstance(control, ft.ResponsiveRow) for control in home.controls))
         for width, compact in ((600, True), (1100, False), (480, True)):
             await self.ui.resized(SimpleNamespace(width=width))
             self.assertIs(self.ui.body.content, home)
@@ -204,26 +255,44 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         await self.until(startup.entered.is_set)
         await asyncio.wait_for(self.ui.bootstrap(auto_connect=True), .5)
         self.service.connect.assert_called_once()
+        self.assertTrue(self.service.connect.call_args.kwargs["require_ethernet"])
         self.assertTrue(self.ui.ready.is_set())
         self.assertFalse(startup.finished.is_set())
         self.assertFalse(hotspot.finished.is_set())
 
-    def test_adapter_and_settings_arrival_order_preserves_valid_selection_and_user_edit(self):
+    async def test_automatic_skipped_authentication_releases_controls_and_syncs_status(self):
+        self.service.load_settings.return_value["legacy_saved_login"] = True
+        self.service.connect.return_value = {"message": "未检测到可用的有线连接，已跳过自动认证",
+                                            "authenticated": False, "ready": False, "skipped": True}
+        await self.ui.bootstrap(auto_connect=True)
+        self.assertTrue(self.service.connect.call_args.kwargs["require_ethernet"])
+        self.assertIn("已跳过", self.ui.status.value)
+        self.assertEqual(self.ui.status.value, self.ui.notice.value)
+        self.assertFalse(self.ui.progress.visible)
+        self.assertFalse(self.ui.connect_button.disabled)
+
+    async def test_manual_login_is_available_after_automatic_ethernet_skip(self):
+        self.ui.legacy.value = True
+        await self.ui.connect()
+        self.assertFalse(self.service.connect.call_args.kwargs["require_ethernet"])
+
+    def test_adapters_are_selected_automatically_and_stay_stable(self):
+        self.ui.connection_mode.value = "wired"
         other = "22222222-2222-4222-8222-222222222222"
         rows = self.service.list_adapters.return_value + [{"guid": other, "name": "Synthetic second Ethernet",
             "status": "Up", "if_type": 6, "hardware_interface": True}]
         self.ui._apply_adapters(rows)
-        self.assertIsNone(self.ui.ethernet.value)
+        self.assertEqual(self.ui.ethernet.value, GUID)
         self.ui._apply_settings({"ethernet_guid": other})
-        self.assertEqual(self.ui.ethernet.value, other)
-        self.assertEqual(self.ui.network_label.value, "Synthetic second Ethernet")
+        self.assertEqual(self.ui.ethernet.value, GUID)
+        self.assertEqual(self.ui.network_label.value, "有线网络 · 自动选择")
         self.ui.ethernet.value = GUID
         self.ui.dirty.add("ethernet_guid")
         self.ui._apply_settings({"ethernet_guid": other})
         self.assertEqual(self.ui.ethernet.value, GUID)
-        self.assertEqual(self.ui.network_label.value, "Synthetic Ethernet")
+        self.assertEqual(self.ui.network_label.value, "有线网络 · 自动选择")
 
-    async def test_missing_manually_selected_ethernet_never_switches_to_another_up_adapter(self):
+    async def test_removed_ethernet_automatically_switches_to_connected_adapter(self):
         other = "22222222-2222-4222-8222-222222222222"
         remaining = {"guid": other, "name": "Synthetic alternative Ethernet", "status": "Up",
                      "if_type": 6, "hardware_interface": True}
@@ -231,9 +300,27 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         self.ui.ethernet.value = GUID
         self.ui.changed("ethernet_guid")
         self.ui._apply_adapters([remaining])
-        self.assertIsNone(self.ui.ethernet.value)
-        self.assertIsNone(self.ui.values()["ethernet_guid"])
+        self.assertEqual(self.ui.ethernet.value, other)
+        self.assertEqual(self.ui.values()["ethernet_guid"], other)
         self.assertNotEqual(self.ui.network_label.value, remaining["name"])
+
+    async def test_simplified_settings_and_separate_hotspot_preserve_inputs(self):
+        self.ui._apply_settings({'connection_mode':'wired', 'wired_service':'old-service'})
+        self.assertEqual(self.ui.values()['connection_mode'],'auto')
+        self.assertEqual(self.ui.values()['wired_service'],'internet')
+        self.assertFalse(self.ui.client_options.visible)
+        self.ui.wired_backend.value='native'
+        self.ui.changed('wired_backend')
+        self.assertTrue(self.ui.client_options.visible)
+        self.ui.wired_backend.value='independent'
+        self.ui.changed('wired_backend')
+        self.assertFalse(self.ui.client_options.visible)
+        self.ui.key.value='synthetic-hotspot-password'
+        await self.ui.show_hotspot()
+        self.assertEqual(self.ui.current_view,'hotspot')
+        self.assertTrue(self.ui.key.can_reveal_password)
+        await self.ui.show_home()
+        self.assertEqual(self.ui.key.value,'synthetic-hotspot-password')
 
     async def test_connect_waits_for_saved_preferences_before_capturing_values_only(self):
         saved = dict(self.service.load_settings.return_value, ssid="Synthetic saved hotspot",
@@ -594,7 +681,7 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_progress_delivery_after_loop_closure_cannot_fail_actual_worker(self):
         finished = threading.Event()
-        def connect(values, credentials, remember, cancel, log):
+        def connect(values, credentials, remember, cancel, log, **kwargs):
             log("synthetic worker progress")
             finished.set()
             return {"message": "已连接校园网"}

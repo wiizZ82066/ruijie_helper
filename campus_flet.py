@@ -62,6 +62,16 @@ class CampusUI:
         self.compact = False
         self.ready = asyncio.Event()
         self.preferences_task = None
+        self.network_watch_started = False
+        self.connection_inputs = None
+        self.wired_active = False
+        self.last_wired_status = None
+        self.recovery_attempts = 0
+        self.next_recovery = 0
+        self.recovery_pending = False
+        self.last_attempt_target = None
+        from utils.resume_watch import ResumeWatch
+        self.resume_watch = ResumeWatch(reader=(lambda: (0, 0)) if preview else None)
         self._make_controls()
 
     def field(self, name, hint, *, password=False, value=""):
@@ -85,6 +95,12 @@ class CampusUI:
             self.hotspot_state = None
             self._show_hotspot(None)
             self.spawn(self.refresh_hotspot())
+        if name == "connection_mode" and self.adapters is not None:
+            self._apply_adapters(self.adapters)
+            self.update()
+        if name == "wired_backend":
+            self.client_options.visible = self.wired_backend.value == "native"
+            self.update()
 
     def spawn(self, coroutine):
         if self.jobs.closed:
@@ -104,6 +120,8 @@ class CampusUI:
         self.password.on_submit = self.connect
         self.remember = ft.Checkbox(label="记住账号密码", value=False,
             active_color=TEAL, on_change=lambda e: self.changed("remember"))
+        self.import_button = ft.TextButton("从锐捷导入账号", icon=ft.Icons.DOWNLOAD_ROUNDED,
+            tooltip="读取锐捷当前账号，并由 Windows 加密保存", on_click=self.import_credentials)
         self.ssid = self.field("ssid", "热点名称", value="ovo")
         self.key = self.field("hotspot_key", "至少 8 位密码", password=True, value="12345678")
         self.client = self.field("client_dir", "自动查找已安装的锐捷客户端")
@@ -120,8 +138,23 @@ class CampusUI:
             width=float("inf"),
             text_size=13, filled=True, fill_color="#F7F9FA", border_color=LINE,
             border_radius=12, on_select=lambda e: self.changed("ethernet_guid"))
+        self.connection_mode = ft.Dropdown(label="连接方式", value="auto", width=float("inf"),
+            options=[ft.DropdownOption(key=k, text=t) for k, t in
+                     (("auto", "自动 · 有线优先"), ("wired", "仅有线"), ("wireless", "仅无线 JNU"))],
+            text_size=13, filled=True, fill_color="#F7F9FA", border_color=LINE,
+            border_radius=12, on_select=lambda e: self.changed("connection_mode"))
+        self.wired_backend = ft.Dropdown(label="有线认证方式", value="independent",width=float("inf"), menu_width=280,
+            options=[ft.DropdownOption(key='independent',text='独立认证'),ft.DropdownOption(key='native',text='兼容认证 · 使用锐捷')],
+            filled=True,fill_color='#F7F9FA',border_color=LINE,border_radius=12,
+            on_select=lambda e:self.changed('wired_backend'))
+        self.wired_service = self.field('wired_service','认证服务',value='internet')
+        self.client_options = ft.Column([
+            self.label("锐捷客户端目录"), self.client,
+            ft.Row([ft.TextButton("自动查找", icon=ft.Icons.SEARCH_ROUNDED, on_click=self.discover),
+                    ft.TextButton("选择目录", icon=ft.Icons.FOLDER_OPEN_ROUNDED, on_click=self.browse)], wrap=True),
+        ], visible=False, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self.band = ft.Dropdown(label="热点频段", value="2.4GHz",
-            width=float("inf"),
+            width=float("inf"), menu_width=240,
             options=[ft.DropdownOption(key=n, text=n) for n in ["2.4GHz", "5GHz", "自动"]],
             border_color=LINE, border_radius=12, filled=True, fill_color="#F7F9FA",
             on_select=lambda e: self.changed("band"))
@@ -144,8 +177,8 @@ class CampusUI:
             bgcolor=TEAL, color="white", on_click=self.save_settings)
         self.action_controls = [self.connect_button, self.hotspot_button, self.save_button,
             self.startup, self.auto_login, self.auto_hotspot, self.legacy,
-            self.ethernet, self.band, self.client, self.username, self.password,
-            self.remember, self.ssid, self.key]
+            self.ethernet, self.connection_mode, self.wired_backend, self.wired_service, self.band, self.client, self.username, self.password,
+            self.remember, self.import_button, self.ssid, self.key]
 
     @staticmethod
     def card(controls, *, expand=None):
@@ -165,11 +198,14 @@ class CampusUI:
             ft.Container(height=2),
             ft.Column([self.label("校园账号"), self.username], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Column([self.label("登录密码"), self.password], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-            self.remember, self.connect_button,
+            ft.Row([self.remember, self.import_button], wrap=True, spacing=8), self.connect_button,
             ft.Row([ft.Icon(ft.Icons.LOCK_OUTLINE_ROUNDED, size=14, color=MUTED),
                     ft.Text("保存的账号由 Windows 加密保护", size=11, color=MUTED, expand=True)], spacing=6),
         ])
-        login.col = {"xs": 12, "md": 6}
+        return self.section("校园网", self.status, login,
+                            "自动选择网络 · 有线优先，未接网线时使用 JNU 无线")
+
+    def hotspot_view(self):
         hotspot = self.card([
             ft.Row([ft.Container(ft.Icon(ft.Icons.WIFI_ROUNDED, color=TEAL, size=22),
                                 bgcolor=PALE, padding=11, border_radius=13),
@@ -178,35 +214,28 @@ class CampusUI:
             ft.Container(height=2),
             ft.Column([self.label("热点名称"), self.ssid], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Column([self.label("热点密码"), self.key], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-            ft.Container(height=32), self.hotspot_button,
+            self.band, self.auto_hotspot, self.hotspot_button,
             ft.Text("自动选择可用的共享来源", size=11, color=MUTED),
         ])
-        hotspot.col = {"xs": 12, "md": 6}
+        return self.section("个人热点", ft.Text("把电脑的网络分享给其他设备", size=14, color=MUTED),
+                            hotspot, "修改名称、密码或频段，会在下次开启热点时生效")
+
+    @staticmethod
+    def section(title, subtitle, content, hint):
         return ft.Column([
-            ft.Text("校园网络", size=28, weight=ft.FontWeight.W_700, color=INK),
-            self.status, ft.Container(height=10),
-            ft.ResponsiveRow([login, hotspot], spacing=18, run_spacing=18,
-                             breakpoints={"xs": 0, "md": 720}),
-            ft.Container(height=4),
-            ft.Row([ft.Icon(ft.Icons.TUNE_ROUNDED, size=16, color=MUTED),
-                    ft.Text("自动连接、网卡与启动选项可在设置中调整", size=12, color=MUTED, expand=True)], spacing=8),
+            ft.Text(title, size=28, weight=ft.FontWeight.W_700, color=INK),
+            subtitle, ft.Container(height=6),
+            ft.Container(ft.Container(content, width=640), alignment=ft.Alignment.TOP_LEFT),
+            ft.Text(hint, size=12, color=MUTED),
         ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def settings_view(self):
         general = self.card([
             ft.Text("常规", size=18, weight=ft.FontWeight.W_600),
-            self.label("客户端目录"), self.client,
-            ft.Row([ft.TextButton("自动查找", icon=ft.Icons.SEARCH_ROUNDED, on_click=self.discover),
-                    ft.TextButton("选择目录", icon=ft.Icons.FOLDER_OPEN_ROUNDED, on_click=self.browse)]),
+            self.wired_backend,
+            self.client_options,
             ft.Divider(color=LINE), self.auto_login, self.legacy,
             self.startup, self.startup_label,
-        ])
-        hotspot = self.card([
-            ft.Text("网络与热点", size=18, weight=ft.FontWeight.W_600),
-            ft.Row([ft.Container(self.ethernet, expand=True),
-                    ft.IconButton(ft.Icons.REFRESH_ROUNDED, tooltip="刷新网卡", on_click=self.refresh_adapters_click)]),
-            self.band, self.auto_hotspot,
-            ft.Text("名称和密码在主页设置，修改会在下次开启热点时生效。", size=12, color=MUTED),
         ])
         maintenance = self.card([
             ft.Text("维护", size=18, weight=ft.FontWeight.W_600),
@@ -217,14 +246,12 @@ class CampusUI:
                 controls=[self.log_view], expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
                 tile_padding=0, maintain_state=True, icon_color=TEAL),
         ])
-        general.col = hotspot.col = {"xs": 12, "md": 6}
         return ft.Column([
             ft.Row([ft.Text("设置", size=28, weight=ft.FontWeight.W_700),
                     ft.Container(expand=True), self.save_button]),
             ft.Text("按你的使用习惯调整", size=14, color=MUTED),
             ft.Container(height=6),
-            ft.ResponsiveRow([general, hotspot], spacing=18, run_spacing=18,
-                             breakpoints={"xs": 0, "md": 720}), maintenance,
+            general, maintenance,
         ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def build(self):
@@ -241,13 +268,14 @@ class CampusUI:
         self.page.window.on_event = self.window_event
         self.page.window.visible = not self.minimized
         self.nav_home = self.nav_button("连接", ft.Icons.GRID_VIEW_ROUNDED, self.show_home, selected=True)
+        self.nav_hotspot = self.nav_button("热点", ft.Icons.WIFI_TETHERING_ROUNDED, self.show_hotspot)
         self.nav_settings = self.nav_button("设置", ft.Icons.SETTINGS_OUTLINED, self.show_settings)
         self.sidebar = ft.Container(ft.Column([
             ft.Container(ft.Icon(ft.Icons.LAN_ROUNDED, color="white", size=30),
                          bgcolor=TEAL, padding=15, border_radius=18, width=60),
             ft.Text("校园网", size=22, weight=ft.FontWeight.W_700, color=INK),
             ft.Text("连接与共享", size=12, color=MUTED),
-            ft.Container(height=26), self.nav_home, self.nav_settings,
+            ft.Container(height=26), self.nav_home, self.nav_hotspot, self.nav_settings,
             ft.Container(expand=True),
             ft.Text("CAMPUS", size=11, color="#93A3AA", weight=ft.FontWeight.W_600),
         ], spacing=10, expand=True), width=168, padding=ft.Padding(22, 34, 18, 24),
@@ -257,6 +285,7 @@ class CampusUI:
             ft.Icon(ft.Icons.LAN_ROUNDED, color=TEAL, size=24),
             ft.Text("校园网", size=18, weight=ft.FontWeight.W_600, expand=True),
             ft.IconButton(ft.Icons.GRID_VIEW_ROUNDED, tooltip="连接", icon_color=TEAL, on_click=self.show_home),
+            ft.IconButton(ft.Icons.WIFI_TETHERING_ROUNDED, tooltip="热点", icon_color=TEAL, on_click=self.show_hotspot),
             ft.IconButton(ft.Icons.SETTINGS_OUTLINED, tooltip="设置", icon_color=TEAL, on_click=self.show_settings),
         ], spacing=8), padding=ft.Padding(20, 10, 12, 6), visible=False)
         self.footer = ft.Container(self.notice, padding=ft.Padding(28, 0, 28, 18))
@@ -297,11 +326,17 @@ class CampusUI:
         self.nav_home.style.color = TEAL if view == "home" else MUTED
         self.nav_settings.style.bgcolor = "white" if view == "settings" else "#EDF2F3"
         self.nav_settings.style.color = TEAL if view == "settings" else MUTED
-        self.body.content = self.home() if view == "home" else self.settings_view()
+        self.nav_hotspot.style.bgcolor = "white" if view == "hotspot" else "#EDF2F3"
+        self.nav_hotspot.style.color = TEAL if view == "hotspot" else MUTED
+        self.body.content = {"home": self.home, "hotspot": self.hotspot_view, "settings": self.settings_view}[view]()
         self.update()
 
     async def show_home(self, e=None):
         self._nav("home")
+
+    async def show_hotspot(self, e=None):
+        self._nav("hotspot")
+        self.spawn(self.refresh_hotspot())
 
     async def show_settings(self, e=None):
         self._nav("settings")
@@ -341,9 +376,79 @@ class CampusUI:
         usable = self.legacy.value or (not self.credential_error and self.username.value and self.password.value)
         requested = auto_connect or bool(self.settings and self.auto_login.value)
         if requested and usable and not self.manual_action and not ({"username", "password", "legacy_saved_login"} & self.dirty):
-            await self.connect()
+            await self.connect(automatic=True)
         else:
             self.spawn(self.refresh_hotspot())
+        if not self.preview and not self.network_watch_started:
+            self.network_watch_started = True
+            self.spawn(self.watch_network())
+
+    def _connection_inputs(self):
+        return (self.username.value, self.password.value, self.legacy.value,
+                self.wired_backend.value)
+
+    async def watch_network(self):
+        """Debounce media changes. Never retry a rejected password on a timer."""
+        last, candidate = self.last_attempt_target, None
+        samples = 0
+        while not self.jobs.closed:
+            before_sleep = time.monotonic()
+            await asyncio.sleep(2)
+            resumed = self.resume_watch.poll() or (
+                self.resume_watch.reader is None and time.monotonic() - before_sleep > 15)
+            if self.jobs.closed:
+                break
+            if resumed and self.connection_inputs is not None and self.auto_login.value:
+                self.recovery_pending = True
+                self.recovery_attempts = 0
+                self.next_recovery = time.monotonic() + 5
+            if not self.jobs.mutation_busy:
+                await self.read('wired-status',self.service.wired_status,self._apply_wired_status)
+                await self.read("wireless-keepalive", self.service.maintain_wireless,
+                                lambda _: None, error_message="JNU 在线状态未确认，请重新连接")
+            if (self.jobs.mutation_busy or not self.auto_login.value or
+                    self.connection_inputs != self._connection_inputs()):
+                last = candidate = None
+                samples = 0
+                continue
+            state = self.last_wired_status or {}
+            if state.get('retryable'):
+                self.recovery_pending = True
+                if self.recovery_attempts >= 3:
+                    self.set_status('自动重连已暂停，请检查网络后手动连接')
+                    self.update()
+            elif state.get('ready') and not self.recovery_pending:
+                self.recovery_attempts = 0
+            ticket = self.jobs.begin_read("connection-target")
+            if ticket is None:
+                continue
+            values = self.values()
+            try:
+                target = await asyncio.to_thread(self.service.connection_target, values)
+            except Exception:
+                continue
+            if not self.jobs.accept_read(ticket) or values != self.values():
+                continue
+            if last is None:
+                last = target
+            samples = samples + 1 if target == candidate else 1
+            candidate = target
+            recovering = (self.recovery_pending and self.recovery_attempts < 3 and
+                          time.monotonic() >= self.next_recovery)
+            if (target == last and not recovering) or samples < 2:
+                continue
+            last = target
+            if target[0] not in ("wired", "wireless"):
+                continue
+            if recovering:
+                self.recovery_attempts += 1
+                self.recovery_pending = False
+            await self.connect(automatic=True)
+            self.next_recovery = time.monotonic() + (5, 15, 30)[min(self.recovery_attempts, 2)]
+            # Connection itself can change the WLAN association; seed the
+            # next observation rather than authenticate the same link twice.
+            last, candidate = self.last_attempt_target, None
+            samples = 0
 
     def _credentials(self):
         try:
@@ -364,26 +469,25 @@ class CampusUI:
     def _apply_settings(self, values):
         self.settings = dict(values)
         for name, control in self.setting_fields().items():
-            if name == "ethernet_guid":
+            if name in {"ethernet_guid", "connection_mode", "wired_service"}:
                 continue
             if name not in self.dirty and name in values:
                 control.value = values[name]
         if self.adapters is not None:
             self._apply_adapters(self.adapters)
         self._apply_legacy()
+        self.client_options.visible = self.wired_backend.value == "native"
 
     def _apply_adapters(self, rows):
         self.adapters = rows
-        selected = (self.ethernet.value if "ethernet_guid" in self.dirty else
-                    self.settings.get("ethernet_guid") or self.ethernet.value)
+        selected = self.ethernet.value or self.settings.get("ethernet_guid")
         physical = [r for r in rows if r.get("if_type") == 6 and r.get("hardware_interface") is True]
         self.ethernet.options = [ft.DropdownOption(key=r["guid"], text=r["name"] +
             (" · 已连接" if r.get("status") == "Up" else " · 未连接")) for r in physical]
-        valid = {r["guid"] for r in physical}
         up = [r for r in physical if r.get("status") == "Up"]
-        self.ethernet.value = (selected if selected in valid else
-            up[0]["guid"] if len(up) == 1 and "ethernet_guid" not in self.dirty else None)
-        self.network_label.value = next((r["name"] for r in physical if r["guid"] == self.ethernet.value), "在设置中选择有线网络")
+        up.sort(key=lambda r: (r['guid'] != selected, str(r['guid'])))
+        self.ethernet.value = up[0]['guid'] if up else None
+        self.network_label.value = "有线网络 · 自动选择" if up else "自动连接 JNU 无线"
 
     async def wait_preferences(self):
         # Preserve saved preferences if a user acts immediately after launch.
@@ -395,10 +499,22 @@ class CampusUI:
         return {"client_dir": self.client, "auto_login": self.auto_login,
             "auto_hotspot": self.auto_hotspot, "ethernet_guid": self.ethernet,
             "ssid": self.ssid, "hotspot_key": self.key, "band": self.band,
-            "legacy_saved_login": self.legacy}
+            "legacy_saved_login": self.legacy, "connection_mode": self.connection_mode,
+            'wired_backend':self.wired_backend,'wired_service':self.wired_service}
+
+    def _apply_wired_status(self,result):
+        if not isinstance(result,dict) or result==self.last_wired_status:
+            return
+        self.last_wired_status=dict(result)
+        self.wired_active=bool(result.get('active'))
+        self.connect_button.content='断开校园网' if self.wired_active else '连接校园网'
+        self.connect_button.icon=ft.Icons.LINK_OFF_ROUNDED if self.wired_active else ft.Icons.ARROW_FORWARD_ROUNDED
+        self.set_status(result.get('message','尚未连接校园网'))
 
     def values(self):
-        return {key: control.value for key, control in self.setting_fields().items()}
+        values = {key: control.value for key, control in self.setting_fields().items()}
+        values.update(connection_mode="auto", wired_service="internet")
+        return values
 
     def _apply_legacy(self):
         for c in [self.username, self.password, self.remember]:
@@ -488,6 +604,13 @@ class CampusUI:
                 if apply:
                     apply(result)
                 elif isinstance(result, dict):
+                    if result.get('connection_kind')=='wired':
+                        self._apply_wired_status(result)
+                    elif result.get('connection_kind')=='wireless':
+                        self.wired_active=False
+                        self.last_wired_status=None
+                        self.connect_button.content='连接校园网'
+                        self.connect_button.icon=ft.Icons.ARROW_FORWARD_ROUNDED
                     if "hotspot" in result:
                         self._show_hotspot(result["hotspot"])
                     self.set_status(result.get("message", "已完成"), record=True)
@@ -506,9 +629,14 @@ class CampusUI:
                     else:
                         self.spawn(self.refresh_hotspot())
 
-    async def connect(self, e=None):
+    async def connect(self, e=None, *, automatic=False):
         await self.wait_preferences()
         if self.jobs.mutation_busy:
+            return
+        if self.wired_active and not automatic:
+            self.connection_inputs=None
+            self.recovery_pending=False
+            await self.action(lambda log:self.service.disconnect(),'正在断开校园网…')
             return
         try:
             credentials = None if self.legacy.value else Credentials(
@@ -518,12 +646,37 @@ class CampusUI:
             self.update()
             return
         values, remember = self.values(), bool(self.remember.value)
+        if not automatic:
+            self.recovery_attempts = 0
+            self.recovery_pending = False
+        self.connection_inputs = self._connection_inputs()
         if credentials:
             self.secrets.update((credentials.username, credentials.password))
-        await self.action(lambda log: self.service.connect(values, credentials, remember, self.cancel, log), "正在连接校园网…")
+        def perform(log):
+            target = self.service.connection_target(values)
+            if isinstance(target, tuple):
+                self.last_attempt_target = target
+            return self.service.connect(values, credentials, remember, self.cancel, log,
+                                        require_ethernet=automatic)
+        await self.action(perform, "正在检查网络连接…" if automatic else "正在连接校园网…")
+
+    async def import_credentials(self, e=None):
+        await self.wait_preferences()
+        values = self.values()
+        def done(credentials):
+            self.secrets.update((credentials.username, credentials.password))
+            self.username.value, self.password.value = credentials.username, credentials.password
+            self.password.password = True
+            self.remember.value = True
+            self.legacy.value = False
+            self.credential_error = False
+            self.dirty.update({"username", "password", "remember", "legacy_saved_login"})
+            self.set_status("账号已导入并加密保存，可连接校园网")
+        await self.action(lambda log: self.service.import_credentials(values), "正在导入锐捷账号…", done)
 
     async def toggle_hotspot(self, e=None):
         await self.wait_preferences()
+        await self.read('adapters', self.service.list_adapters, self._apply_adapters)
         if self.hotspot_state is None:
             self.set_status("正在读取热点状态…")
             self.update()
@@ -659,6 +812,10 @@ class CampusUI:
             self.update()
             return
         self.jobs.close()
+        try:
+            await asyncio.to_thread(self.service.close)
+        except Exception:
+            pass
         if self.tray:
             self.tray.stop()
             self.tray = None
@@ -674,16 +831,29 @@ class PreviewService:
         return {"auto_login": False, "auto_hotspot": False, "ssid": "ovo", "hotspot_key": "12345678", "band": "2.4GHz"}
     def load_credentials(self):
         return None
+    def import_credentials(self, values):
+        return Credentials("demo-account", "DemoPassword9")
     def list_adapters(self):
         return [{"guid": "11111111-1111-4111-8111-111111111111", "name": "以太网",
                  "status": "Up", "if_type": 6, "hardware_interface": True}]
+    def connection_target(self, values):
+        return ("wired", "11111111-1111-4111-8111-111111111111")
+    def maintain_wireless(self):
+        return None
+    def wired_status(self):
+        return None
+    def disconnect(self):
+        self.connected=False
+        return {'connection_kind':'wired','authenticated':False,'ready':False,'active':False,'message':'已断开校园网'}
+    def close(self):
+        self.connected=False
     def hotspot_status(self, guid):
         time.sleep(1.5)
         return "已启动" if self.hotspot else "未启动"
     def read_startup_state(self):
         time.sleep(1.5)
         return False
-    def connect(self, values, credentials, remember, cancel, log):
+    def connect(self, values, credentials, remember, cancel, log, *, require_ethernet=False):
         self.connected = True
         return {"message": "已连接校园网", "authenticated": True}
     def toggle_hotspot(self, enabled, values, log):
@@ -705,7 +875,7 @@ class PreviewService:
 
 def runtime_self_test():
     """Synthetic crypto checks; no real credential files or network access."""
-    from utils.auth_credentials import decode_profile, encode_profile, encrypt_native_password
+    from utils.auth_credentials import decode_profile, encode_profile, encrypt_native_password, _decrypt_saved_password
     from utils.credential_store import WindowsDPAPI
     profile = b"[PUBLIC]\r\nName=SELF_TEST\r\n"
     if decode_profile(encode_profile(profile)) != profile:
@@ -713,6 +883,8 @@ def runtime_self_test():
     material = bytes.fromhex("0123456789abcdef1234567890abcdef")
     if encrypt_native_password("Now is the time for all ", material) != "E5C7CDDE872BF27C43E934008C389C0F683788499A7C05F6":
         raise RuntimeError("DES-CBC self-test failed")
+    if _decrypt_saved_password("E5C7CDDE872BF27C43E934008C389C0F683788499A7C05F6", material) != "Now is the time for all ":
+        raise RuntimeError("Native import self-test failed")
     protector = WindowsDPAPI()
     if protector.decrypt(protector.encrypt(profile)) != profile:
         raise RuntimeError("DPAPI self-test failed")
@@ -796,7 +968,12 @@ def main():
             ui._nav("settings")
             ui._nav("home")
             synchronized = ui.status.value == ui.notice.value == "已连接校园网"
-            result.update(ok=bool(interactive and service.connected and duration < 1.0 and synchronized),
+            await ui.import_credentials()
+            imported = (ui.username.value == "demo-account" and ui.password.value == "DemoPassword9"
+                        and ui.password.password and ui.remember.value and not ui.legacy.value
+                        and ui.status.value == ui.notice.value)
+            result.update(ok=bool(interactive and service.connected and duration < 1.0 and synchronized and imported),
+                          native_import_ui_ok=bool(imported),
                           login_available_during_status_read=interactive,
                           status_synchronized=synchronized,
                           synthetic_connect_seconds=round(duration, 4))

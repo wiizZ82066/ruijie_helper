@@ -18,6 +18,16 @@ def set_startup(enabled: bool, *, entry_script=None):
 $data=[Console]::In.ReadToEnd() | ConvertFrom-Json
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $name='CampusLogin-' + $sid
+$scheduler=New-Object -ComObject Schedule.Service
+$scheduler.Connect()
+$folder=$scheduler.GetFolder('\')
+function Read-OwnTask {
+ try { return $folder.GetTask($name) }
+ catch {
+  if ($_.Exception.GetBaseException().HResult -eq -2147024894) { return $null }
+  throw
+ }
+}
 if ($data.enabled) {
  $action=New-ScheduledTaskAction -Execute $data.executable -Argument $data.arguments -WorkingDirectory $data.directory
  $trigger=New-ScheduledTaskTrigger -AtLogOn -User $sid
@@ -25,10 +35,14 @@ if ($data.enabled) {
  $principal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Highest
  $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
  $null=Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description '校园网兼容认证器：当前用户登录后启动并按设置开启热点。' -Force
-} elseif (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
- Unregister-ScheduledTask -TaskName $name -Confirm:$false
+} elseif (Read-OwnTask) {
+ $folder.DeleteTask($name, 0)
 }
-@{enabled=[bool]$data.enabled;name=$name} | ConvertTo-Json -Compress
+$actual=Read-OwnTask
+if ($data.enabled) {
+ if (-not $actual -or -not $actual.Enabled) { throw 'Startup registration not confirmed' }
+} elseif ($actual) { throw 'Startup removal not confirmed' }
+@{enabled=[bool]($actual -and $actual.Enabled)} | ConvertTo-Json -Compress
 '''
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand",
@@ -38,5 +52,8 @@ if ($data.enabled) {
         capture_output=True, encoding="utf-8", errors="replace", timeout=30,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "自启动设置失败")
-    return json.loads(result.stdout)
+        raise RuntimeError("无法更新自启动任务，请以管理员身份运行后重试。")
+    value=json.loads(result.stdout)
+    if type(value.get('enabled')) is not bool or value['enabled'] != enabled:
+        raise RuntimeError('自启动状态未确认，请重试。')
+    return value

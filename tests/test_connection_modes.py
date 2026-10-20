@@ -340,8 +340,12 @@ class ConnectionModeTests(unittest.TestCase):
         self.adapter_query.return_value=[adapter()]
         with patch('utils.wired_auth.WiredClient',autospec=True) as factory:
             factory.return_value.connect.side_effect=RuntimeError('fixture failure')
+            state={'active':False,'ready':False,'retryable':True,'message':'retry'}
+            factory.return_value.snapshot.return_value=state
             with self.assertRaises(RuntimeError): self.connect(auto_hotspot=True)
             factory.return_value.close.assert_called_once()
+            self.assertEqual(self.service.wired_status(),state)
+            self.service.disconnect()
             self.assertIsNone(self.service.wired_status())
             self.hotspot.assert_not_called()
 

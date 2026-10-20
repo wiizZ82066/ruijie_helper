@@ -402,7 +402,7 @@ class AuthServiceTests(unittest.TestCase):
         self.service.set_startup(False, {}, self.logs.append)
         self.startup.assert_called_with(False, entry_script=self.service.entry_script)
 
-    def test_startup_read_checks_exact_entry_arguments_and_unknown_is_not_disabled(self):
+    def test_startup_read_uses_stable_user_task_even_after_moving_program(self):
         with patch("utils.auth_service.subprocess.run") as run:
             for content, code, expected in [('{"enabled":true}', 0, True), ('{"enabled":false}', 0, False),
                                             ('{"enabled":null}', 0, None), ('{"enabled":false}', 1, None),
@@ -412,7 +412,8 @@ class AuthServiceTests(unittest.TestCase):
             payload = json.loads(run.call_args.kwargs["input"])
             self.assertEqual(payload["arguments"], subprocess.list2cmdline([str(self.service.entry_script), "--connect", "--minimized"]))
             script = base64.b64decode(run.call_args.args[0][-1]).decode("utf-16le")
-            self.assertIn("$action.Arguments -ine [string]$data.arguments", script)
+            self.assertNotIn("$action.Arguments -ine [string]$data.arguments", script)
+            self.assertIn("CampusLogin-", script)
             self.assertNotIn("IndexOf", script)
 
     def test_startup_helper_keeps_default_entry_and_supports_custom_or_frozen_entry(self):
@@ -430,6 +431,17 @@ class AuthServiceTests(unittest.TestCase):
                 self.assertEqual(payload["arguments"], "--connect --minimized")
                 self.assertEqual(payload["executable"], sys.executable)
                 self.assertEqual(self.service._startup_identity()["arguments"], payload["arguments"])
+
+    def test_startup_disable_requires_confirmed_system_result(self):
+        with patch('utils.auth_startup.subprocess.run') as run:
+            run.return_value=SimpleNamespace(returncode=0,stdout='{"enabled":true}')
+            with self.assertRaisesRegex(RuntimeError,'未确认'):
+                auth_startup.set_startup(False)
+            run.return_value=SimpleNamespace(returncode=0,stdout='{"enabled":false}')
+            self.assertFalse(auth_startup.set_startup(False)['enabled'])
+            script=base64.b64decode(run.call_args.args[0][-1]).decode('utf-16le')
+            self.assertIn('$folder.DeleteTask($name, 0)',script)
+            self.assertIn('Startup removal not confirmed',script)
 
     def test_restore_disables_future_automation_even_with_invalid_hotspot_draft(self):
         result = self.service.restore(dict(self.values, auto_login=True, auto_hotspot=True, hotspot_key=""), self.logs.append)

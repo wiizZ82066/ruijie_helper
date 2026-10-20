@@ -16,6 +16,7 @@ import flet as ft
 
 from utils.credential_store import Credentials, CredentialStoreError
 from utils.ui_tasks import TaskCoordinator
+from utils.connection_events import ProgressMessage, STAGE_LABELS
 
 INK = "#172B35"
 MUTED = "#6D818B"
@@ -131,7 +132,7 @@ class CampusUI:
             on_change=lambda e: self.changed("auto_hotspot"))
         self.legacy = ft.Switch(label="使用原客户端保存的账号", value=False, active_color=TEAL,
             on_change=self.legacy_changed)
-        self.startup = ft.Checkbox(label="登录 Windows 后自动启动", value=None, tristate=True,
+        self.startup = ft.Switch(label="开机自启动", value=False,
             active_color=TEAL, on_change=self.change_startup)
         self.startup_label = ft.Text("进入设置后读取状态", size=12, color=MUTED)
         self.ethernet = ft.Dropdown(label="有线网络", options=[], value=None,
@@ -169,7 +170,12 @@ class CampusUI:
             on_click=self.toggle_hotspot, height=46, width=float("inf"),
             style=ft.ButtonStyle(bgcolor=PALE, color=TEAL, elevation=0,
                 shape=ft.RoundedRectangleBorder(radius=12)))
-        self.progress = ft.ProgressBar(height=3, color=TEAL, bgcolor=PALE, visible=False)
+        self.progress = ft.ProgressBar(height=8, border_radius=4, color=TEAL, bgcolor=LINE, value=0, visible=False)
+        self.flow_label = ft.Text('准备连接', size=12, color=TEAL, expand=True)
+        self.flow_percent = ft.Text('0%', size=12, color=TEAL, weight=ft.FontWeight.W_600)
+        self.flow_panel = ft.Container(ft.Column([
+            ft.Row([self.flow_label, self.flow_percent]), self.progress,
+        ], spacing=9), padding=ft.Padding(14, 12, 14, 12), border_radius=12, bgcolor=PALE, visible=False)
         self.notice = ft.Text(self.status.value, size=12, color=MUTED)
         self.log_view = ft.TextField(multiline=True, read_only=True, min_lines=8,
             max_lines=14, text_size=12, border_color=LINE, border_radius=12)
@@ -199,11 +205,9 @@ class CampusUI:
             ft.Column([self.label("校园账号"), self.username], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Column([self.label("登录密码"), self.password], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Row([self.remember, self.import_button], wrap=True, spacing=8), self.connect_button,
-            ft.Row([ft.Icon(ft.Icons.LOCK_OUTLINE_ROUNDED, size=14, color=MUTED),
-                    ft.Text("保存的账号由 Windows 加密保护", size=11, color=MUTED, expand=True)], spacing=6),
+            self.flow_panel,
         ])
-        return self.section("校园网", self.status, login,
-                            "自动选择网络 · 有线优先，未接网线时使用 JNU 无线")
+        return self.section("校园网", self.status, login)
 
     def hotspot_view(self):
         hotspot = self.card([
@@ -215,18 +219,15 @@ class CampusUI:
             ft.Column([self.label("热点名称"), self.ssid], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Column([self.label("热点密码"), self.key], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             self.band, self.auto_hotspot, self.hotspot_button,
-            ft.Text("自动选择可用的共享来源", size=11, color=MUTED),
         ])
-        return self.section("个人热点", ft.Text("把电脑的网络分享给其他设备", size=14, color=MUTED),
-                            hotspot, "修改名称、密码或频段，会在下次开启热点时生效")
+        return self.section("个人热点", None, hotspot)
 
     @staticmethod
-    def section(title, subtitle, content, hint):
+    def section(title, subtitle, content):
         return ft.Column([
             ft.Text(title, size=28, weight=ft.FontWeight.W_700, color=INK),
-            subtitle, ft.Container(height=6),
+            *([subtitle] if subtitle is not None else []), ft.Container(height=6),
             ft.Container(ft.Container(content, width=640), alignment=ft.Alignment.TOP_LEFT),
-            ft.Text(hint, size=12, color=MUTED),
         ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def settings_view(self):
@@ -243,13 +244,13 @@ class CampusUI:
                     ft.TextButton("清除保存的账号", on_click=self.confirm_forget),
                     ft.TextButton("恢复原版", on_click=self.confirm_restore)], wrap=True),
             ft.ExpansionTile(title=ft.Text("运行记录", size=13, color=MUTED),
-                controls=[self.log_view], expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[self.log_view,
+                    ft.TextButton('打开本地日志', icon=ft.Icons.FOLDER_OPEN_ROUNDED, on_click=self.open_logs)], expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
                 tile_padding=0, maintain_state=True, icon_color=TEAL),
         ])
         return ft.Column([
             ft.Row([ft.Text("设置", size=28, weight=ft.FontWeight.W_700),
                     ft.Container(expand=True), self.save_button]),
-            ft.Text("按你的使用习惯调整", size=14, color=MUTED),
             ft.Container(height=6),
             general, maintenance,
         ], spacing=16, scroll=ft.ScrollMode.AUTO, expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
@@ -274,7 +275,6 @@ class CampusUI:
             ft.Container(ft.Icon(ft.Icons.LAN_ROUNDED, color="white", size=30),
                          bgcolor=TEAL, padding=15, border_radius=18, width=60),
             ft.Text("校园网", size=22, weight=ft.FontWeight.W_700, color=INK),
-            ft.Text("连接与共享", size=12, color=MUTED),
             ft.Container(height=26), self.nav_home, self.nav_hotspot, self.nav_settings,
             ft.Container(expand=True),
             ft.Text("CAMPUS", size=11, color="#93A3AA", weight=ft.FontWeight.W_600),
@@ -288,9 +288,9 @@ class CampusUI:
             ft.IconButton(ft.Icons.WIFI_TETHERING_ROUNDED, tooltip="热点", icon_color=TEAL, on_click=self.show_hotspot),
             ft.IconButton(ft.Icons.SETTINGS_OUTLINED, tooltip="设置", icon_color=TEAL, on_click=self.show_settings),
         ], spacing=8), padding=ft.Padding(20, 10, 12, 6), visible=False)
-        self.footer = ft.Container(self.notice, padding=ft.Padding(28, 0, 28, 18))
+        self.footer = ft.Container(self.notice, padding=ft.Padding(28, 0, 28, 18), visible=False)
         self.page.add(ft.Row([self.sidebar,
-            ft.Column([self.progress, self.compact_bar, self.body, self.footer], spacing=0,
+            ft.Column([self.compact_bar, self.body, self.footer], spacing=0,
                 expand=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         ], spacing=0, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH))
         width = getattr(self.page, "width", None)
@@ -322,6 +322,7 @@ class CampusUI:
 
     def _nav(self, view):
         self.current_view = view
+        self.footer.visible = view != 'home'
         self.nav_home.style.bgcolor = "white" if view == "home" else "#EDF2F3"
         self.nav_home.style.color = TEAL if view == "home" else MUTED
         self.nav_settings.style.bgcolor = "white" if view == "settings" else "#EDF2F3"
@@ -507,7 +508,10 @@ class CampusUI:
             return
         self.last_wired_status=dict(result)
         self.wired_active=bool(result.get('active'))
-        self.connect_button.content='断开校园网' if self.wired_active else '连接校园网'
+        ready=result.get('ready',True)
+        if not self.jobs.mutation_busy and not ready:
+            self.flow_panel.visible=False
+        self.connect_button.content=('断开校园网' if ready else '重新连接') if self.wired_active else '连接校园网'
         self.connect_button.icon=ft.Icons.LINK_OFF_ROUNDED if self.wired_active else ft.Icons.ARROW_FORWARD_ROUNDED
         self.set_status(result.get('message','尚未连接校园网'))
 
@@ -527,7 +531,7 @@ class CampusUI:
 
     def _show_startup(self, state):
         self.startup_state = state if type(state) is bool else None
-        self.startup.value = self.startup_state
+        self.startup.value = state is True
         self.startup_label.value = ("已开启 · 登录后约 30 秒启动" if state is True else
                                     "已关闭" if state is False else "状态暂未确认，可点击设置")
 
@@ -561,7 +565,18 @@ class CampusUI:
         return text
 
     def _busy(self, busy):
-        self.progress.visible = busy
+        if busy:
+            self.progress.visible = True
+            self.flow_panel.visible = True
+            self.progress.value = 0
+            self.progress.color = TEAL
+            self.flow_label.value = '准备连接'
+            self.flow_percent.value = '0%'
+        else:
+            self.progress.visible=self.flow_panel.visible
+            if self.progress.value != 1:
+                self.flow_label.value = '操作未完成'
+                self.progress.color = '#B86E2C'
         for control in self.action_controls:
             control.disabled = busy
         self._apply_legacy()
@@ -577,7 +592,16 @@ class CampusUI:
         def progress(message):
             def deliver():
                 if self.jobs.accept_mutation(ticket):
-                    self.append_log(message)
+                    if isinstance(message, ProgressMessage):
+                        # Only verified completion reaches 100%. Repairs may
+                        # revisit an earlier stage without reversing the bar.
+                        portion={'network':.08,'prepare':.22,'authenticate':.45,'address':.65,'verify':.85,'complete':1}.get(message.stage,0)
+                        self.progress.value = max(self.progress.value or 0, portion)
+                        self.flow_percent.value = f'{self.progress.value:.0%}'
+                        self.flow_label.value = STAGE_LABELS.get(message.stage,'正在连接')
+                        self.set_status(message, record=True)
+                    else:
+                        self.append_log(message)
                     self.update()
             try:
                 self.loop.call_soon_threadsafe(deliver)
@@ -603,6 +627,7 @@ class CampusUI:
             if self.jobs.accept_mutation(ticket):
                 if apply:
                     apply(result)
+                    self.flow_panel.visible = False
                 elif isinstance(result, dict):
                     if result.get('connection_kind')=='wired':
                         self._apply_wired_status(result)
@@ -614,10 +639,17 @@ class CampusUI:
                     if "hotspot" in result:
                         self._show_hotspot(result["hotspot"])
                     self.set_status(result.get("message", "已完成"), record=True)
+                    if result.get('ready'):
+                        self.progress.value=1
+                        self.flow_percent.value='100%'
+                        self.flow_label.value='已连接'
+                    elif 'connection_kind' not in result:
+                        self.flow_panel.visible=False
+                    elif not result.get('active') and not result.get('authenticated'):
+                        self.flow_panel.visible=False
         except Exception as error:
             if self.jobs.accept_mutation(ticket):
                 self.set_status("操作未完成：" + str(error), record=True)
-                self._show_startup(None)
         finally:
             if self.jobs.finish_mutation(ticket):
                 self._busy(False)
@@ -628,12 +660,14 @@ class CampusUI:
                         await self.exit()
                     else:
                         self.spawn(self.refresh_hotspot())
+                        if self.current_view == 'settings' and self.startup_state is None:
+                            self.spawn(self.read('startup', self.service.read_startup_state, self._show_startup))
 
     async def connect(self, e=None, *, automatic=False):
         await self.wait_preferences()
         if self.jobs.mutation_busy:
             return
-        if self.wired_active and not automatic:
+        if self.wired_active and (self.last_wired_status or {}).get('ready',True) and not automatic:
             self.connection_inputs=None
             self.recovery_pending=False
             await self.action(lambda log:self.service.disconnect(),'正在断开校园网…')
@@ -653,12 +687,21 @@ class CampusUI:
         if credentials:
             self.secrets.update((credentials.username, credentials.password))
         def perform(log):
+            self.service.record_ui_event(
+                f'自动连接 / 重连，当前重试次数 {self.recovery_attempts}' if automatic else '用户请求连接')
             target = self.service.connection_target(values)
             if isinstance(target, tuple):
                 self.last_attempt_target = target
             return self.service.connect(values, credentials, remember, self.cancel, log,
                                         require_ethernet=automatic)
         await self.action(perform, "正在检查网络连接…" if automatic else "正在连接校园网…")
+
+    async def open_logs(self, e=None):
+        try:
+            await asyncio.to_thread(self.service.open_logs)
+        except Exception:
+            self.set_status('无法打开日志目录，请检查本机文件权限', record=True)
+            self.update()
 
     async def import_credentials(self, e=None):
         await self.wait_preferences()
@@ -698,12 +741,24 @@ class CampusUI:
         await self.action(lambda log: self.service.save_settings(values), "正在保存…", done)
 
     async def change_startup(self, e):
+        requested=getattr(e,'data',None)
+        enabled = requested if type(requested) is bool else (
+            requested.lower()=='true' if isinstance(requested,str) and requested.lower() in ('true','false') else bool(self.startup.value))
         await self.wait_preferences()
-        enabled, values = bool(self.startup.value), self.values()
+        if self.jobs.mutation_busy:
+            self._show_startup(self.startup_state)
+            self.update()
+            return
+        values = self.values()
+        done_ok=False
         def done(result):
+            nonlocal done_ok
+            done_ok=True
             self._show_startup(result.get("enabled"))
             self.set_status("自启动设置已更新")
         await self.action(lambda log: self.service.set_startup(enabled, values, log), "正在设置自启动…", done)
+        if not done_ok:
+            await self.read('startup',self.service.read_startup_state,self._show_startup)
 
     async def discover(self, e=None):
         revision = self.client.value
@@ -823,6 +878,11 @@ class CampusUI:
 
 
 class PreviewService:
+    def open_logs(self):
+        pass
+
+    def record_ui_event(self, message):
+        pass
     """Deterministic UI preview; cannot access credentials or change networking."""
     def __init__(self):
         self.connected = False

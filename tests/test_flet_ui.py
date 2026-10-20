@@ -52,6 +52,48 @@ class GatedRead:
 
 
 class FletUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_shows_current_stage_and_synchronizes_status(self):
+        from utils.connection_events import ProgressMessage
+        gate=GatedRead({'message':'完成'})
+        def work(log):
+            log(ProgressMessage('authenticate','正在认证'))
+            return gate()
+        task=asyncio.create_task(self.ui.action(work,'准备'))
+        try:
+            for _ in range(100):
+                if gate.entered.is_set() and self.ui.progress.value==.45: break
+                await asyncio.sleep(.01)
+            self.assertEqual(self.ui.progress.value,.45)
+            self.assertEqual(self.ui.flow_percent.value,'45%')
+            self.assertEqual(self.ui.flow_label.value,'账号认证')
+            self.assertEqual(self.ui.status.value,'正在认证')
+            self.assertEqual(self.ui.status.value,self.ui.notice.value)
+        finally:
+            gate.release.set()
+            await task
+        self.assertFalse(self.ui.flow_panel.visible)
+
+    async def test_disable_startup_uses_event_even_when_control_value_is_stale(self):
+        self.ui._show_startup(True)
+        await self.ui.change_startup(SimpleNamespace(data='false'))
+        self.assertFalse(self.service.set_startup.call_args.args[0])
+        self.assertIs(self.ui.startup.value,False)
+
+    async def test_unrelated_failure_does_not_reset_startup_state(self):
+        self.ui._show_startup(True)
+        def fail(log): raise RuntimeError('synthetic error')
+        await self.ui.action(fail,'测试')
+        self.assertIs(self.ui.startup.value,True)
+
+    async def test_not_ready_session_button_reconnects_instead_of_only_disconnect(self):
+        self.ui.username.value=ACCOUNT
+        self.ui.password.value=PASSWORD
+        self.ui._apply_wired_status({'active':True,'ready':False,'message':'网络不可用'})
+        self.assertEqual(self.ui.connect_button.content,'重新连接')
+        await self.ui.connect()
+        self.service.connect.assert_called_once()
+        self.service.disconnect.assert_not_called()
+
     async def test_independent_status_disconnect_and_shared_labels(self):
         state={'connection_kind':'wired','active':True,'authenticated':True,'ready':True,'message':'已连接校园网 · 独立有线认证'}
         self.ui._apply_wired_status(state)
@@ -496,7 +538,9 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         self.assert_statuses_match("正在连接校园网…")
         active.release.set()
         await pending
-        self.assertIs(self.ui.progress.visible, False)
+        self.assertIs(self.ui.progress.visible, True)
+        self.assertEqual(self.ui.progress.value,1)
+        self.assertEqual(self.ui.flow_percent.value,'100%')
         self.assertFalse(self.ui.jobs.mutation_busy)
         for control in self.ui.action_controls:
             self.assertIsNot(control.disabled, True)
@@ -526,7 +570,9 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
             json.dumps({"account": ACCOUNT, "password": PASSWORD}))
         with self.matching_status_updates():
             await self.ui.connect()
-        self.assertFalse(self.ui.progress.visible)
+        self.assertIsNotNone(self.ui.progress.value)
+        self.assertLess(self.ui.progress.value,1)
+        self.assertEqual(self.ui.flow_label.value,'操作未完成')
         self.assertNotIn("正在连接", self.ui.status.value)
         self.assertIn("[redacted]", self.ui.status.value)
         for secret in (ACCOUNT, PASSWORD, json.dumps(PASSWORD)[1:-1]):

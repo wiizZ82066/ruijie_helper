@@ -2,6 +2,7 @@
 from collections import deque
 from copy import deepcopy
 import threading
+import time
 import unittest
 from unittest.mock import Mock,patch
 from utils.wired_auth import WiredClient, RecoverableError
@@ -102,7 +103,7 @@ class WiredAuthTests(unittest.TestCase):
             self.client.connect(self.credentials,self.cancel)
         self.assertEqual(sum(f[15]==1 for f in self.switch.sent),1)
         self.assertFalse(self.client.snapshot()['retryable'])
-        self.handoff.restore.assert_called_once()
+        self.handoff.restore.assert_not_called()
         self.assertTrue(self.switch.closed)
     def test_server_enables_unimplemented_heartbeat_not_falsely_online(self):
         self.switch.heartbeat=True
@@ -125,10 +126,66 @@ class WiredAuthTests(unittest.TestCase):
         self.assertFalse(self.client.snapshot()['active'])
         self.assertIn('断开',self.client.snapshot()['message'])
         self.assertTrue(self.client.snapshot()['retryable'])
+
+    def test_server_ending_established_session_allows_bounded_reconnect(self):
+        self.client.connect(self.credentials,self.cancel)
+        self.switch.frames.append(EthernetEapol(LOCAL,PEER,0,EapPacket(4,9).encode()).encode())
+        self.client._thread.join(3)
+        state=self.client.snapshot()
+        self.assertFalse(state['ready'])
+        self.assertTrue(state['retryable'])
     def test_authenticated_without_internet_not_ready(self):
         self.http.request.return_value.body=b'portal'
-        result=self.client.connect(self.credentials,self.cancel)
-        self.assertTrue(result['authenticated']);self.assertFalse(result['ready'])
+        with self.assertRaisesRegex(RuntimeError,'无法上网'):
+            self.client.connect(self.credentials,self.cancel)
+        result=self.client.snapshot()
+        self.assertFalse(result['authenticated']);self.assertFalse(result['ready'])
+        self.assertFalse(result['active']);self.assertTrue(result['retryable'])
+        self.lease.assert_called_once_with(GUID)
+        self.handoff.restore.assert_not_called()
+
+    def test_stale_lease_recovers_with_one_renew_and_reauth(self):
+        self.http.request.side_effect=[Mock(status=200,body=b'portal'),
+                                       Mock(status=200,body=b'Microsoft Connect Test')]
+        events=[]
+        result=self.client.connect(self.credentials,self.cancel,events.append)
+        self.assertTrue(result['ready'])
+        self.lease.assert_called_once_with(GUID)
+        self.assertEqual(sum(f[15]==1 for f in self.switch.sent),3)
+        self.assertEqual([e.stage for e in events if hasattr(e,'stage')][-1],'complete')
+
+    def test_probe_retains_safe_failure_category(self):
+        from utils.interface_http import InterfaceHTTPError
+        self.http.request.side_effect=InterfaceHTTPError('private diagnostics', 'dns')
+        events=[];self.client._log=events.append
+        self.assertFalse(self.client._internet(CONFIG))
+        self.assertEqual(self.client._probe_reason,'dns')
+        self.assertNotIn('private',repr(events))
+
+    def test_live_session_losing_internet_stops_and_becomes_retryable(self):
+        real_clock=time.monotonic
+        offset=[0]
+        failed=threading.Event()
+        def log(message):
+            if 'unexpected_response' in message: failed.set()
+        with patch('utils.wired_auth.time.monotonic',side_effect=lambda:real_clock()+offset[0]):
+            self.client.connect(self.credentials,self.cancel,log)
+            # Let the session settle outside its sleep-gap detection, then
+            # advance only the scheduled probe deadline.
+            self.http.request.return_value.body=b'portal'
+            # Exercise the production loop without a wall-clock 30s wait.
+            # Advance 10 seconds per tick to remain below the wake threshold.
+            for _ in range(4):
+                offset[0]+=10
+                time.sleep(.15)
+            self.assertTrue(failed.wait(2))
+            offset[0]+=6
+            self.client._thread.join(3)
+        state=self.client.snapshot()
+        self.assertFalse(state['active'])
+        self.assertFalse(state['ready'])
+        self.assertTrue(state['retryable'])
+        self.assertIn('连续检测失败',state['message'])
 
 
 if __name__=='__main__': unittest.main()

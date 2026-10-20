@@ -27,6 +27,7 @@ from utils.core_install import CoreInstaller
 from utils.credential_store import Credentials, CredentialStore, CredentialStoreError
 from utils.hotspot import HotspotManager
 from utils.network_diagnostics import collect_network_diagnostics
+from utils.connection_events import LocalJournal, ProgressMessage
 
 try:
     from utils.auth_credentials import prepare_credentials, read_saved_credentials
@@ -56,12 +57,8 @@ catch {
  }
  throw
 }
-if ($task.Definition.Actions.Count -ne 1) { @{enabled=$null} | ConvertTo-Json -Compress; exit }
-$action=$task.Definition.Actions.Item(1)
-if ([string]$action.Path -ine [string]$data.executable -or
-    [string]$action.Arguments -ine [string]$data.arguments) {
- @{enabled=$null} | ConvertTo-Json -Compress; exit
-}
+# The task name belongs to this user. A moved executable must not make an
+# existing startup task impossible to display or disable from the new copy.
 @{enabled=[bool]$task.Enabled} | ConvertTo-Json -Compress
 '''
 
@@ -69,13 +66,33 @@ if ([string]$action.Path -ine [string]$data.executable -or
 def _safe_errors(method):
     @wraps(method)
     def run(self, *args, **kwargs):
+        began=time.monotonic()
+        connection=method.__name__=='connect'
+        if connection:
+            self._trace.session=uuid4().hex[:12]
+            self.journal.write('connection_start','开始连接',session=self._trace.session)
         try:
-            return method(self, *args, **kwargs)
-        except CredentialStoreError:
+            result=method(self, *args, **kwargs)
+            if connection:
+                state=result if isinstance(result,dict) else {}
+                self.journal.write('connection_result',state.get('message','连接操作结束'),
+                    session=self._trace.session, duration_ms=round((time.monotonic()-began)*1000),
+                    ready=state.get('ready'),authenticated=state.get('authenticated'),
+                    cancelled=state.get('cancelled'),outcome='ready' if state.get('ready') else 'not_ready')
+            return result
+        except CredentialStoreError as error:
+            self.journal.write('credential_error','无法读取或保存账号',
+                session=getattr(self._trace,'session',''),operation=method.__name__,error_type=type(error).__name__)
             raise  # This API deliberately provides non-sensitive typed errors.
         except Exception as error:
+            self.journal.write('operation_error', self._redact(str(error)),
+                session=getattr(self._trace,'session',''), operation=method.__name__,
+                duration_ms=round((time.monotonic()-began)*1000),error_type=type(error).__name__)
             kind = ValueError if isinstance(error, ValueError) else RuntimeError
             raise kind(self._redact(str(error))) from None
+        finally:
+            if connection:
+                self._trace.session=''
     return run
 
 
@@ -96,6 +113,10 @@ class CampusService:
         self._wireless_session = None
         self._wireless_next_keepalive = 0.0
         self._wired_session = None
+        self._last_wired_status = None
+        self._journal_wired_status = None
+        self._trace = threading.local()
+        self.journal = LocalJournal(self.data_dir / 'logs', self._redact)
 
     def _remember(self, values=None, credentials=None):
         with self._secrets_lock:
@@ -116,7 +137,37 @@ class CampusService:
         return text
 
     def _logger(self, log):
-        return lambda message: (log or (lambda _: None))(self._redact(message))
+        began=time.monotonic()
+        session=getattr(self._trace,'session','') or uuid4().hex[:12]
+        current_stage=''
+        stage_started=began
+        sequence=0
+        lock=threading.Lock()
+        def emit(message):
+            nonlocal current_stage,stage_started,sequence
+            text = self._redact(message)
+            stage = getattr(message, 'stage', '')
+            with lock:
+                now=time.monotonic()
+                if stage and stage!=current_stage:
+                    if current_stage:
+                        self.journal.write('stage_finished','阶段结束',session=session,stage=current_stage,
+                            duration_ms=round((now-stage_started)*1000))
+                    current_stage,stage_started=stage,now
+                sequence+=1
+                fields=dict(getattr(message,'fields',{}))
+                fields.update(stage=stage or current_stage,session=session,sequence=sequence,
+                              elapsed_ms=round((now-began)*1000))
+                self.journal.write(getattr(message,'event','progress'), text, **fields)
+            (log or (lambda _: None))(ProgressMessage(stage, text) if stage else text)
+        return emit
+
+    def open_logs(self):
+        self.journal.directory.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(self.journal.directory))
+
+    def record_ui_event(self, message):
+        self.journal.write('ui', message)
 
     @staticmethod
     def _settings(values, *, strict=False, base=None):
@@ -278,6 +329,8 @@ class CampusService:
         if type(enabled) is not bool:
             raise ValueError("自启动选项格式无效。")
         with self._operation_lock:
+            began=time.monotonic()
+            self.journal.write('startup_request','设置开机自启动',enabled=enabled)
             if enabled and values.get("connection_mode", "wired") == "wired" and values.get("wired_backend", "independent") == "native":
                 client_dir = self._require_client(values)
                 current = CoreInstaller(client_dir, data_dir=self.data_dir).status()
@@ -286,7 +339,10 @@ class CampusService:
                 self.save_settings(dict(values, client_dir=str(client_dir)))
             elif enabled:
                 self.save_settings(values)
-            return configure_startup(enabled, entry_script=self.entry_script)
+            result=configure_startup(enabled, entry_script=self.entry_script)
+            self.journal.write('startup_result','系统自启动任务已核验',enabled=result.get('enabled'),
+                duration_ms=round((time.monotonic()-began)*1000))
+            return result
 
     @staticmethod
     def _cancelled():
@@ -300,6 +356,7 @@ class CampusService:
         with self._operation_lock:
             if cancel.is_set():
                 return self._cancelled()
+            emit(ProgressMessage('network', '正在检查网络连接…'))
             mode = values.get("connection_mode", "wired")
             if mode not in ("wired", "wireless", "auto"):
                 raise ValueError("连接方式无效。")
@@ -392,6 +449,7 @@ class CampusService:
         if self._wired_session is not None:
             self._wired_session.close()
             self._wired_session = None
+        self._last_wired_status = None
 
     def _connect_independent(self, values, credentials, remember, cancel, emit):
         from utils.wired_auth import WiredClient
@@ -417,8 +475,12 @@ class CampusService:
         try:
             result=client.connect(credentials,cancel,emit)
         except BaseException:
-            client.close()
-            self._wired_session=None
+            status=client.snapshot()
+            try:
+                client.close()
+            finally:
+                self._wired_session=None
+                self._last_wired_status=status
             raise
         if result.get('ready') and value['auto_hotspot']:
             hotspot=self._start_hotspot(value,emit,cancel=cancel)
@@ -429,12 +491,19 @@ class CampusService:
 
     def wired_status(self):
         client=self._wired_session
-        return client.snapshot() if client is not None else None
+        result=client.snapshot() if client is not None else self._last_wired_status
+        if isinstance(result,dict) and result!=self._journal_wired_status:
+            self._journal_wired_status=dict(result)
+            self.journal.write('wired_status', result.get('message',''),
+                ready=result.get('ready'), authenticated=result.get('authenticated'),
+                retryable=result.get('retryable'))
+        return result
 
     @_safe_errors
     def disconnect(self):
         with self._operation_lock:
             self._close_wired()
+            self.journal.write('disconnect', '用户已断开校园网')
             return {'connection_kind':'wired','authenticated':False,'ready':False,
                     'active':False,'message':'已断开校园网'}
 
@@ -448,8 +517,9 @@ class CampusService:
         from utils.wireless_network import ensure_jnu, current_jnu
         from utils.interface_http import InterfaceHTTP
         from utils.jnu_portal import PortalClient
-        emit("正在检查并连接 JNU 无线网络…")
+        emit(ProgressMessage('network',"正在检查并连接 JNU 无线网络…"))
         binding = ensure_jnu(cancel)
+        emit(ProgressMessage('address','已连接 JNU，正在确认网络地址…'))
         if cancel.is_set():
             return self._cancelled()
         native_saved = bool(values.get("legacy_saved_login", False))

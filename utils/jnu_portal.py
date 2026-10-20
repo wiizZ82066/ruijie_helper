@@ -176,17 +176,20 @@ class PortalClient:
         return _json(response).get("result") == "success"
 
     def connect(self, credentials: Credentials, log=lambda _: None):
+        from utils.connection_events import ProgressMessage
         self.session_index = ""
         self.keepalive_seconds = 0.0
         self._check()
+        log(ProgressMessage('verify','正在检查 JNU 网络连通性…'))
         probe = self.http.request("GET", PROBE)
         self._check()
         if probe.status == 200 and probe.body.strip() == EXPECTED:
             confirmed = self._confirm_online()
+            log(ProgressMessage('complete','JNU 无线网络已可上网'))
             return {"authenticated": confirmed, "ready": True, "connection_kind": "wireless",
                     "message": "JNU 无线网络已连接" if confirmed else "JNU 无线网络已可上网，认证状态未确认"}
         query, mac = portal_context(probe)
-        log("正在读取 JNU 登录设置…")
+        log(ProgressMessage('prepare',"正在读取 JNU 登录设置…"))
         page = self._api("pageInfo", {"queryString": query})
         # getServices puts its once-encoded context in the URL, unlike login.
         self._check()
@@ -205,7 +208,7 @@ class PortalClient:
         if flag not in ("true", "false"):
             raise PortalError("未能确认登录页的密码提交方式，已停止认证。")
         password = (_rsa_password(credentials.password, mac, page) if flag == "true" else credentials.password)
-        log("正在通过 JNU 安全登录接口认证…")
+        log(ProgressMessage('authenticate',"正在通过 JNU 安全登录接口认证…"))
         result = self._api("login", {"userId": credentials.username, "password": password,
             "service": "", "queryString": query, "operatorPwd": "", "operatorUserId": "",
             # The actual landing page's hidden input defaults to literal false.
@@ -220,9 +223,12 @@ class PortalClient:
         self.keepalive_seconds = self._keepalive_interval(result.get("keepaliveInterval"))
         confirmed = self._confirm_online(index)
         self._check()
+        log(ProgressMessage('verify','正在验证 JNU 登录后的网络连通性…'))
         probe = self.http.request("GET", PROBE)
         self._check()
         ready = probe.status == 200 and probe.body.strip() == EXPECTED
+        if ready:
+            log(ProgressMessage('complete','JNU 无线网络已可上网'))
         return {"authenticated": confirmed, "ready": ready, "connection_kind": "wireless",
                 "message": "已连接 JNU 无线校园网" if confirmed and ready else
                 "JNU 认证成功，网络连通性仍待确认" if confirmed else "JNU 已接受登录，在线状态仍待确认"}

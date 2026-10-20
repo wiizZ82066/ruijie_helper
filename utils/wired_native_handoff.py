@@ -31,7 +31,8 @@ def native_absent():
 
 
 class NativeHandoff:
-    def __init__(self):
+    def __init__(self, *, restart_on_failure=True):
+        self.restart_on_failure=restart_on_failure
         self.core=None
         self.service_stopped=False
 
@@ -76,7 +77,10 @@ class NativeHandoff:
             if not native_absent():
                 raise RuntimeError('原客户端仍在运行，未开始独立认证。')
         except BaseException:
-            self.restore()
+            if self.restart_on_failure:
+                self.restore()
+            else:
+                self.forget()
             raise
 
     def restore(self):

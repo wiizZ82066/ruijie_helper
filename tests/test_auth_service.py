@@ -448,6 +448,15 @@ class AuthServiceTests(unittest.TestCase):
             self.assertIn('$folder.DeleteTask($name, 0)',script)
             self.assertIn('Startup removal not confirmed',script)
 
+    def test_uninstall_preserves_task_owned_by_another_copy(self):
+        with patch('utils.auth_startup.subprocess.run') as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout='{"enabled":true,"preserved":true}')
+            self.assertTrue(auth_startup.set_startup(False, remove_only_matching=True)['preserved'])
+            payload = json.loads(run.call_args.kwargs['input'])
+            self.assertTrue(payload['remove_only_matching'])
+            with self.assertRaises(RuntimeError):
+                auth_startup.set_startup(False)
+
     def test_restore_disables_future_automation_even_with_invalid_hotspot_draft(self):
         result = self.service.restore(dict(self.values, auto_login=True, auto_hotspot=True, hotspot_key=""), self.logs.append)
         self.installer.restore.assert_called_once()

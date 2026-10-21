@@ -281,6 +281,18 @@ class CampusService:
         except Exception:
             return {'supported': False, 'message': '未检测到可用的兼容备选'}
 
+    def driver_status(self):
+        from utils.driver_setup import check_driver
+        data = check_driver()
+        self.journal.write('driver_check', data['message'], reason=data['state'])
+        return data
+
+    def check_updates(self):
+        from utils.update_check import check_for_updates
+        data = check_for_updates()
+        self.journal.write('update_check', data['message'], reason=data['state'])
+        return data
+
     def startup_decision(self, values):
         from utils.startup_network import decision
         try:

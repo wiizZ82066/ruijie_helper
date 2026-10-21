@@ -17,6 +17,7 @@ import flet as ft
 from utils.credential_store import Credentials, CredentialStoreError
 from utils.ui_tasks import TaskCoordinator
 from utils.connection_events import ProgressMessage, STAGE_LABELS
+from utils.app_version import VERSION
 
 INK = "#172B35"
 MUTED = "#6D818B"
@@ -55,6 +56,10 @@ class CampusUI:
         self.startup_state = None
         self.startup_revision = 0
         self.startup_changing = False
+        self.driver_state = None
+        self.driver_checking = False
+        self.driver_dialog_status = None
+        self.update_checking = False
         self.startup_waiting = minimized
         self.next_startup_check = 0
         self.auto_requested = False
@@ -102,6 +107,7 @@ class CampusUI:
             self.spawn(self.refresh_hotspot())
         if name in {"connection_mode", "wired_backend"}:
             self._show_connection_options()
+            self._show_driver_notice()
             if self.adapters is not None:
                 self._apply_adapters(self.adapters)
             self.spawn(self.refresh_compatibility())
@@ -190,10 +196,17 @@ class CampusUI:
             ft.Row([self.flow_label, self.flow_percent]), self.progress,
         ], spacing=9), padding=ft.Padding(14, 12, 14, 12), border_radius=12, bgcolor=PALE, visible=False)
         self.notice = ft.Text(self.status.value, size=12, color=MUTED)
+        self.driver_label = ft.Text('正在检查有线连接环境…', size=13, color=MUTED)
+        self.driver_notice = ft.Container(ft.Column([
+            self.driver_label,
+            ft.TextButton('查看驱动安装说明', icon=ft.Icons.BUILD_ROUNDED, on_click=self.show_driver_setup),
+        ], spacing=4), bgcolor=PALE, padding=12, border_radius=12, visible=False)
         self.log_view = ft.TextField(multiline=True, read_only=True, min_lines=8,
             max_lines=14, text_size=12, border_color=LINE, border_radius=12)
         self.save_button = ft.Button("保存设置", icon=ft.Icons.CHECK_ROUNDED,
             bgcolor=TEAL, color="white", on_click=self.save_settings)
+        self.version_button = ft.TextButton(f'v{VERSION}', tooltip='检查版本更新',
+            on_click=self.check_updates, style=ft.ButtonStyle(color=MUTED, padding=0))
         self.action_controls = [self.connect_button, self.hotspot_button, self.save_button,
             self.startup, self.auto_login, self.auto_hotspot, self.legacy,
             self.ethernet, self.connection_mode, self.wired_backend, self.wired_service, self.band, self.client, self.username, self.password,
@@ -219,6 +232,7 @@ class CampusUI:
             ft.Column([self.label("登录密码"), self.password], spacing=7, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             ft.Row([self.remember, self.import_button], wrap=True, spacing=8), self.connect_button,
             self.flow_panel,
+            self.driver_notice,
         ])
         return self.section("校园网", self.status, login)
 
@@ -252,7 +266,10 @@ class CampusUI:
         ])
         maintenance = self.card([
             ft.Text("维护", size=18, weight=ft.FontWeight.W_600),
+            ft.Row([ft.Text(f'版本 v{VERSION}', size=12, color=MUTED),
+                    ft.TextButton('检查更新', on_click=self.check_updates)], wrap=True),
             ft.Row([ft.TextButton("检查网络", on_click=self.diagnose),
+                    ft.TextButton("环境检测与驱动说明", on_click=self.show_driver_setup),
                     ft.TextButton("清除保存的账号", on_click=self.confirm_forget),
                     ft.TextButton("恢复原版", on_click=self.confirm_restore)], wrap=True),
             ft.ExpansionTile(title=ft.Text("运行记录", size=13, color=MUTED),
@@ -289,7 +306,7 @@ class CampusUI:
             ft.Text("校园网", size=22, weight=ft.FontWeight.W_700, color=INK),
             ft.Container(height=26), self.nav_home, self.nav_hotspot, self.nav_settings,
             ft.Container(expand=True),
-            ft.Text("CAMPUS", size=11, color="#93A3AA", weight=ft.FontWeight.W_600),
+            self.version_button,
         ], spacing=10, expand=True), width=168, padding=ft.Padding(22, 34, 18, 24),
             bgcolor="#EDF2F3", border=ft.Border(right=ft.BorderSide(1, LINE)))
         self.body = ft.Container(self.home(), expand=True, padding=ft.Padding(28, 30, 28, 12))
@@ -380,6 +397,107 @@ class CampusUI:
                 self.compatibility_label.value = result.get('message', '兼容备选暂未确认')
         await self.read('compatibility', lambda: self.service.compatibility_status(values), apply)
 
+    def _show_driver_notice(self):
+        state = self.driver_state or {}
+        self.driver_label.value = state.get('message', '正在检查有线连接环境…')
+        self.driver_notice.visible = bool(state and state.get('state') != 'ready'
+                                         and self.connection_mode.value != 'wireless')
+
+    async def refresh_driver(self, e=None):
+        if self.driver_checking or self.jobs.closed:
+            return
+        self.driver_checking = True
+        if self.driver_dialog_status is not None:
+            self.driver_dialog_status.value = '正在检查…'
+            self.update()
+        try:
+            data = await asyncio.to_thread(self.service.driver_status)
+            if not isinstance(data, dict) or data.get('state') not in (
+                    'ready', 'missing', 'broken', 'denied', 'no_interfaces', 'unknown'):
+                data = {'state': 'unknown', 'message': '暂时无法确认有线驱动状态'}
+        except Exception:
+            data = {'state': 'unknown', 'message': '暂时无法确认有线驱动状态'}
+        finally:
+            self.driver_checking = False
+        if not self.jobs.closed:
+            self.driver_state = data
+            self._show_driver_notice()
+            if self.driver_dialog_status is not None:
+                self.driver_dialog_status.value = data['message']
+            self.update()
+
+    async def show_driver_setup(self, e=None):
+        if self.jobs.closed:
+            return
+        from utils.driver_setup import DOWNLOAD_PAGE
+        self.driver_dialog_status = ft.Text(
+            (self.driver_state or {}).get('message', '正在检查…'), color=TEAL, size=14)
+        async def website(event):
+            try:
+                await ft.UrlLauncher().launch_url(DOWNLOAD_PAGE)
+            except Exception:
+                self.driver_dialog_status.value = '请在浏览器打开 https://npcap.com/#download'
+                self.update()
+        async def dismiss(event):
+            self.page.pop_dialog()
+            self.driver_dialog_status = None
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text('准备有线连接'),
+            content=ft.Container(ft.Column([
+                self.driver_dialog_status,
+                ft.Text('无线 JNU 不需要这个驱动；本程序有线认证不需要安装锐捷客户端。', size=13),
+                ft.Text('安装流程请查看随程序附带的说明。只在需要有线认证且驱动缺失时安装 Npcap。', size=13),
+                ft.Text('暂时不能上网？可先连接手机热点，或在其他设备上下载后复制到这台电脑。'
+                        '安装完成后点击“重新检测”；若安装器要求重启，请先重启。', size=12, color=MUTED),
+                ft.Row([
+                    ft.Button('打开安装说明', icon=ft.Icons.HELP_OUTLINE_ROUNDED, on_click=self.open_driver_guide),
+                    ft.TextButton('Npcap 官网', on_click=website),
+                ], wrap=True),
+            ], tight=True, spacing=16, scroll=ft.ScrollMode.AUTO), width=440, height=260),
+            actions=[ft.TextButton('重新检测', on_click=self.refresh_driver),
+                     ft.TextButton('返回', on_click=dismiss)]))
+        self.spawn(self.refresh_driver())
+
+    async def open_driver_guide(self, e=None):
+        guide = (Path(sys.executable).parent if getattr(sys, 'frozen', False)
+                 else Path(__file__).resolve().parent / 'docs') / 'driver-installation.html'
+        try:
+            os.startfile(str(guide))
+        except OSError:
+            self.set_status('未能打开安装说明，请在程序目录查看 driver-installation.html')
+            self.update()
+
+    async def check_updates(self, e=None):
+        if self.update_checking or self.jobs.closed:
+            return
+        self.update_checking = True
+        self.version_button.content = '检查中…'
+        self.update()
+        try:
+            data = await asyncio.to_thread(self.service.check_updates)
+            if not isinstance(data, dict):
+                raise ValueError('Invalid result')
+        except Exception:
+            data = {'state': 'unavailable', 'message': '暂时无法检查更新，请稍后重试。'}
+        finally:
+            self.update_checking = False
+            self.version_button.content = f'v{VERSION}'
+        if self.jobs.closed:
+            return
+        async def dismiss(event):
+            self.page.pop_dialog()
+        async def releases(event):
+            from utils.update_check import RELEASES_URL
+            try:
+                await ft.UrlLauncher().launch_url(RELEASES_URL)
+            except Exception:
+                self.set_status('无法打开浏览器，请从项目 GitHub 发布页下载。')
+                self.update()
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text('版本更新'),
+            content=ft.Text(f"当前版本 v{VERSION}\n\n{data.get('message', '暂时无法检查更新')}"),
+            actions=[ft.TextButton('打开发布页', on_click=releases), ft.TextButton('关闭', on_click=dismiss)]))
+        self.update()
+
     def _show_connection_options(self):
         self.wired_options.visible = self.connection_mode.value != 'wireless'
         self.client_options.visible = self.wired_backend.value == 'native'
@@ -416,6 +534,7 @@ class CampusUI:
         self.ready.set()
         if self.jobs.closed:
             return
+        self.spawn(self.refresh_driver())
         usable = self.legacy.value or (not self.credential_error and self.username.value and self.password.value)
         requested = auto_connect or bool(self.settings and self.auto_login.value)
         if requested and usable and not self.manual_action and not ({"username", "password", "legacy_saved_login"} & self.dirty):
@@ -991,6 +1110,10 @@ class PreviewService:
         return False
     def compatibility_status(self, values):
         return {'supported': False, 'message': '未检测到可用的兼容备选'}
+    def driver_status(self):
+        return {'state': 'ready', 'message': '有线驱动已就绪'}
+    def check_updates(self):
+        return {'state': 'current', 'message': '预览模式，不访问网络。'}
     def startup_decision(self, values):
         return {'connect': True, 'reason': 'preview', 'message': '预览'}
     def connect(self, values, credentials, remember, cancel, log, *, require_ethernet=False):
@@ -1074,13 +1197,28 @@ def main():
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--test-report", type=Path)
+    parser.add_argument("--check-driver", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--setup-startup", choices=['enable', 'disable', 'remove-owned'], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.check_driver:
+        from utils.driver_setup import probe_driver, EXIT_CODES
+        return EXIT_CODES[probe_driver()['state']]
     preview = args.preview or args.self_test
     if not preview and not ctypes.windll.shell32.IsUserAnAdmin():
+        if args.setup_startup:
+            return 1  # Installer must wait for the actual elevated operation.
         arguments = sys.argv[1:] if getattr(sys, "frozen", False) else [str(Path(__file__).resolve()), *sys.argv[1:]]
         code = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
             subprocess.list2cmdline(arguments), str(Path(sys.executable).parent), 1)
         return 0 if code > 32 else 1
+    if args.setup_startup:
+        from utils.auth_startup import set_startup
+        try:
+            set_startup(args.setup_startup == 'enable', entry_script=Path(__file__).resolve(),
+                        remove_only_matching=args.setup_startup == 'remove-owned')
+            return 0
+        except Exception:
+            return 1
     from utils.flet_runtime import run_desktop
     from utils.auth_service import CampusService
     data_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "CampusLogin"

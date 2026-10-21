@@ -74,6 +74,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Packaged runtime is missing or was modified; a
 $guide = Join-Path $PSScriptRoot 'docs\flet-user-guide.txt'
 if (-not (Test-Path -LiteralPath $guide)) { throw 'Flet user guide is missing; archive creation stopped.' }
 Copy-Item -LiteralPath $guide -Destination (Join-Path $bundle 'user-guide.txt') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'docs\driver-installation.html') -Destination $bundle -Force
 $archive = Join-Path $outputRoot 'CampusAuthenticatorFlet-win-x64.zip'
 Compress-Archive -LiteralPath $bundle -DestinationPath $archive -Force
 Write-Output "Created: $(Join-Path $bundle 'CampusAuthenticatorFlet.exe')"

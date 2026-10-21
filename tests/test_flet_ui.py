@@ -52,6 +52,47 @@ class GatedRead:
 
 
 class FletUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_update_check_preserves_connection_status_and_restores_version(self):
+        self.ui.set_status('校园网已连接')
+        self.service.check_updates.return_value = {'state': 'available', 'message': '发现新版'}
+        await self.ui.check_updates()
+        self.assertEqual(self.ui.status.value, '校园网已连接')
+        self.assertEqual(self.ui.version_button.content, f'v{gui.VERSION}')
+        self.page.show_dialog.assert_called_once()
+        self.assertFalse(self.ui.update_checking)
+
+    async def test_bootstrap_does_not_check_updates_or_open_websites(self):
+        await self.ui.bootstrap()
+        self.service.check_updates.assert_not_called()
+        self.page.show_dialog.assert_not_called()
+
+    async def test_driver_missing_shows_help_without_opening_dialog(self):
+        self.service.driver_status.return_value = {'state': 'missing', 'message': '需要安装驱动'}
+        self.ui.minimized = True
+        await self.ui.refresh_driver()
+        self.assertTrue(self.ui.driver_notice.visible)
+        self.page.show_dialog.assert_not_called()
+        self.assertFalse(self.ui.connect_button.disabled)
+
+    async def test_driver_recheck_clears_warning_and_wireless_does_not_require_it(self):
+        self.service.driver_status.return_value = {'state': 'missing', 'message': '缺少驱动'}
+        self.ui.connection_mode.value = 'wireless'
+        await self.ui.refresh_driver()
+        self.assertFalse(self.ui.driver_notice.visible)
+        self.ui.connection_mode.value = 'wired'
+        self.ui._show_driver_notice()
+        self.assertTrue(self.ui.driver_notice.visible)
+        self.service.driver_status.return_value = {'state': 'ready', 'message': '驱动就绪'}
+        await self.ui.refresh_driver()
+        self.assertFalse(self.ui.driver_notice.visible)
+
+    async def test_driver_probe_does_not_block_bootstrap(self):
+        gate = self.gate({'state': 'missing', 'message': '缺少驱动'})
+        self.service.driver_status.side_effect = gate
+        await asyncio.wait_for(self.ui.bootstrap(), .8)
+        self.assertTrue(self.ui.ready.is_set())
+        self.assertFalse(self.ui.connect_button.disabled)
+
     async def test_progress_shows_current_stage_and_synchronizes_status(self):
         from utils.connection_events import ProgressMessage
         gate=GatedRead({'message':'完成'})

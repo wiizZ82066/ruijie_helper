@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>准备有线连接 · 校园网助手</title>
+<style>body{font:16px/1.8 "Segoe UI","Microsoft YaHei",sans-serif;background:#f3f6f7;color:#172b35;margin:0;padding:24px}main{max-width:720px;margin:24px auto;background:white;border-radius:20px;padding:32px}h1{font-size:28px}h2{font-size:20px;margin-top:28px}a{color:#087f83}li{margin:12px 0}.note{background:#e8f5f3;padding:16px;border-radius:12px}small{color:#6d818b}</style>
+<main><h1>准备有线连接</h1>
+<p class="note">仅使用 JNU 无线？无需安装这个驱动，可以直接返回助手登录。<br>助手提示“有线驱动已就绪”？也不需要重复安装。</p>
+<p>有线认证需要一个名为 Npcap 的网络驱动。本程序可以检测它，但不会替你下载或安装。独立有线认证不需要安装锐捷客户端。</p>
+<h2>按这三步操作</h2><ol>
+<li>打开 <a href="https://npcap.com/#download">Npcap 官方下载页</a>，选择 <strong>Npcap installer</strong>。不要选 SDK、源代码或调试符号。下载后打开安装文件。</li>
+<li>确认 Windows 管理员提示，阅读许可并按向导继续。保留 <strong>Install Npcap in WinPcap API-compatible Mode</strong>（兼容模式）选项；本助手无需开启无线监听模式。已有 WinPcap 时，兼容模式可能替换它，请阅读安装器提示。</li>
+<li>安装结束后回到助手，打开“设置 → 环境检测与驱动说明”，点击<strong>重新检测</strong>。显示驱动就绪后再连接校园网；若安装器要求重启，先保存工作并重启电脑。</li>
+</ol><h2>目前没有网络怎么办？</h2>
+<p>可以临时连接手机热点访问官网，或在另一台联网电脑上下载官方安装文件，再用 U 盘复制过来。这份说明本身不需要联网。</p>
+<h2>安装后仍提示异常？</h2><ul>
+<li>先完成安装或按提示重启，再重新检测；不要同时打开多个驱动安装向导。</li>
+<li>提示权限不足：退出助手，再右键“以管理员身份运行”。</li>
+<li>提示暂未发现接口：检查网卡是否启用、网线是否插好，再重新检测。这不等于一定没安装驱动。</li>
+<li>驱动就绪仅表示底层组件可加载并能读取接口，校园网账号认证仍需实际连接确认。</li>
+</ul><p><a href="https://npcap.com/guide/npcap-users-guide.html">查看 Npcap 官方安装说明</a> · <a href="https://npcap.com/#download">官方许可与下载</a></p>
+<small>请从官网获取安装文件。助手安装包不包含 Npcap，也不会卸载已有的网络驱动。</small></main></html>

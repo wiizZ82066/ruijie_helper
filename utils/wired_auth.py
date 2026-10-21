@@ -264,10 +264,17 @@ class WiredClient:
         except Exception as error:
             # Only our own curated errors may reach UI; ctypes/OS exceptions can
             # contain paths, addresses or supplied inputs.
-            message=str(error) if type(error) in (RuntimeError, RecoverableError) else ('无法使用抓包驱动，请以管理员身份运行，并安装 WinPcap 或启用 WinPcap API 兼容的 Npcap。' if isinstance(error,ProbeError) else
+            retryable = isinstance(error, (RecoverableError, network.NetworkUnavailable)) or (
+                isinstance(error, ProbeError) and error.retryable)
+            reason = error.kind if isinstance(error, ProbeError) else (
+                'network_unavailable' if isinstance(error, network.NetworkUnavailable) else type(error).__name__)
+            message = str(error) if type(error) in (RuntimeError, RecoverableError, network.NetworkUnavailable, ProbeError) else (
                 '独立认证未完成，请检查驱动、网卡或选择兼容认证。')
+            log(DiagnosticMessage('session_error', message, reason=reason,
+                                  error_type=type(error).__name__, retryable=retryable))
             self._set(authenticated=False,ready=False,active=False,message=message,
-                      retryable=isinstance(error,RecoverableError))
+                      retryable=retryable, reason=reason,
+                      fallback_allowed=retryable or isinstance(error, ProbeError))
             log(message)
             if not self._initial.is_set(): self._error=message
         finally:

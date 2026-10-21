@@ -114,8 +114,8 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ui.status.value,self.ui.notice.value)
         self.assertEqual(self.ui.connect_button.content,'连接校园网')
 
-    async def test_independent_default_is_saved_without_client_directory(self):
-        self.assertEqual(self.ui.values()['wired_backend'],'independent')
+    async def test_auto_authentication_default_is_saved_without_client_directory(self):
+        self.assertEqual(self.ui.values()['wired_backend'],'auto')
         self.assertEqual(self.ui.values()['wired_service'],'internet')
         self.assertEqual(self.ui.values()['client_dir'],'')
 
@@ -348,9 +348,10 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_simplified_settings_and_separate_hotspot_preserve_inputs(self):
         self.ui._apply_settings({'connection_mode':'wired', 'wired_service':'old-service'})
-        self.assertEqual(self.ui.values()['connection_mode'],'auto')
+        self.assertEqual(self.ui.values()['connection_mode'],'wired')
         self.assertEqual(self.ui.values()['wired_service'],'internet')
         self.assertFalse(self.ui.client_options.visible)
+
         self.ui.wired_backend.value='native'
         self.ui.changed('wired_backend')
         self.assertTrue(self.ui.client_options.visible)
@@ -363,6 +364,71 @@ class FletUITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.ui.key.can_reveal_password)
         await self.ui.show_home()
         self.assertEqual(self.ui.key.value,'synthetic-hotspot-password')
+
+    async def test_wireless_hides_secondary_auth_options_and_persists_choice(self):
+        self.ui.connection_mode.value='wireless'
+        self.ui.changed('connection_mode')
+        self.assertFalse(self.ui.wired_options.visible)
+        await self.ui.save_settings()
+        self.assertEqual(self.service.save_settings.call_args.args[0]['connection_mode'],'wireless')
+        self.ui.connection_mode.value='wired'
+        self.ui.changed('connection_mode')
+        self.assertTrue(self.ui.wired_options.visible)
+
+    async def test_startup_read_survives_network_mutation(self):
+        old=self.gate(True)
+        self.service.read_startup_state.side_effect=old
+        await self.ui.show_settings()
+        await self.until(old.entered.is_set)
+        await self.ui.action(lambda log: {'message':'网络操作完成'},'连接')
+        old.release.set()
+        await self.until(old.finished.is_set)
+        await asyncio.gather(*list(self.ui.tasks))
+        self.assertIs(self.ui.startup_state,True)
+        self.assertIs(self.ui.startup.value,True)
+
+    async def test_failed_startup_refresh_preserves_last_confirmed_choice(self):
+        self.ui._show_startup(True)
+        self.service.read_startup_state.return_value=None
+        await self.ui.refresh_startup()
+        self.assertIs(self.ui.startup.value,True)
+        self.assertIn('暂未',self.ui.startup_label.value)
+
+    async def test_navigation_during_startup_write_does_not_read_old_os_state(self):
+        active=self.gate({'enabled':True})
+        self.service.set_startup.side_effect=active
+        pending=self.task(self.ui.change_startup(SimpleNamespace(data='true')))
+        await self.until(active.entered.is_set)
+        await self.ui.show_settings()
+        await asyncio.sleep(0)
+        self.service.read_startup_state.assert_not_called()
+        active.release.set()
+        await pending
+        self.assertIs(self.ui.startup.value,True)
+
+    async def test_settings_action_does_not_permanently_block_silent_network_wait(self):
+        self.ui.startup_waiting=True
+        self.ui.manual_action=True
+        self.service.startup_decision.return_value={'connect':True}
+        self.assertTrue(await self.ui.startup_admitted())
+
+    async def test_silent_startup_online_or_no_campus_skips_authentication(self):
+        for reason in ('already_online','campus_unavailable'):
+            self.ui.startup_waiting=True
+            self.ui.manual_action=False
+            self.service.load_credentials.return_value=Credentials(ACCOUNT,PASSWORD)
+            self.service.startup_decision.return_value={'connect':False,'reason':reason,'message':'等待'}
+            await self.ui.bootstrap(auto_connect=True)
+            self.service.connect.assert_not_called()
+            self.assertFalse(self.ui.flow_panel.visible)
+
+    async def test_silent_startup_available_campus_authenticates(self):
+        self.ui.startup_waiting=True
+        self.service.load_credentials.return_value=Credentials(ACCOUNT,PASSWORD)
+        self.service.startup_decision.return_value={'connect':True,'reason':'campus_available'}
+        await self.ui.bootstrap(auto_connect=True)
+        self.service.connect.assert_called_once()
+        self.assertFalse(self.ui.startup_waiting)
 
     async def test_connect_waits_for_saved_preferences_before_capturing_values_only(self):
         saved = dict(self.service.load_settings.return_value, ssid="Synthetic saved hotspot",

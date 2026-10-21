@@ -66,6 +66,9 @@ class ConnectionModeTests(unittest.TestCase):
         self.auth_log = self.mocked('utils.auth_service.capture_auth_log', return_value=None)
         self.hotspot = self.mocked('utils.auth_service.HotspotManager.start_hotspot_detailed')
         self.startup = self.mocked('utils.auth_service.configure_startup', return_value={'enabled': True})
+        self.monitor = self.mocked('utils.auth_service.NativeSessionMonitor', autospec=True).return_value
+        self.monitor.verify.return_value = dict(connection_kind='wired', backend='native',
+            authenticated=True, ready=True, active=True, retryable=False, message='已连接校园网 · 兼容认证')
 
     def tearDown(self):
         self.assertNotIn(ACCOUNT, repr(self.logs))
@@ -308,11 +311,12 @@ class ConnectionModeTests(unittest.TestCase):
         self.assertEqual(self.portal.connect.call_count, 1)
 
     def test_legacy_missing_mode_preserves_wired_dispatch(self):
+        self.adapter_query.return_value = [adapter()]
         values = dict(self.values,wired_backend='native')
         values.pop('connection_mode')
         self.discovery.return_value = str(self.root / 'native-client')
         self.assertTrue(self.service.connect(values, self.credentials, True, self.cancel, self.logs.append)['ready'])
-        self.adapter_query.assert_not_called()
+        self.adapter_query.assert_called_once()  # Read selected adapter for native profile binding.
         self.ensure.assert_not_called()
         self.portal_type.assert_not_called()
         self.prepare.assert_called_once()

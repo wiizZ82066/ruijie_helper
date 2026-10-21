@@ -53,6 +53,10 @@ class CampusUI:
         self.credential_error = False
         self.hotspot_state = None
         self.startup_state = None
+        self.startup_revision = 0
+        self.startup_changing = False
+        self.startup_waiting = minimized
+        self.next_startup_check = 0
         self.auto_requested = False
         self.manual_action = False
         self.exit_pending = False
@@ -96,12 +100,15 @@ class CampusUI:
             self.hotspot_state = None
             self._show_hotspot(None)
             self.spawn(self.refresh_hotspot())
-        if name == "connection_mode" and self.adapters is not None:
-            self._apply_adapters(self.adapters)
+        if name in {"connection_mode", "wired_backend"}:
+            self._show_connection_options()
+            if self.adapters is not None:
+                self._apply_adapters(self.adapters)
+            self.spawn(self.refresh_compatibility())
             self.update()
-        if name == "wired_backend":
-            self.client_options.visible = self.wired_backend.value == "native"
-            self.update()
+        if name == 'client_dir':
+            self.jobs.invalidate_read('compatibility')
+            self.compatibility_label.value = '保存或重新进入设置后检测'
 
     def spawn(self, coroutine):
         if self.jobs.closed:
@@ -144,8 +151,9 @@ class CampusUI:
                      (("auto", "自动 · 有线优先"), ("wired", "仅有线"), ("wireless", "仅无线 JNU"))],
             text_size=13, filled=True, fill_color="#F7F9FA", border_color=LINE,
             border_radius=12, on_select=lambda e: self.changed("connection_mode"))
-        self.wired_backend = ft.Dropdown(label="有线认证方式", value="independent",width=float("inf"), menu_width=280,
-            options=[ft.DropdownOption(key='independent',text='独立认证'),ft.DropdownOption(key='native',text='兼容认证 · 使用锐捷')],
+        self.wired_backend = ft.Dropdown(label="有线认证方式", value="auto",width=float("inf"), menu_width=280,
+            options=[ft.DropdownOption(key='auto',text='自动 · 本程序优先'),
+                     ft.DropdownOption(key='independent',text='本程序认证'),ft.DropdownOption(key='native',text='兼容认证 · 使用锐捷')],
             filled=True,fill_color='#F7F9FA',border_color=LINE,border_radius=12,
             on_select=lambda e:self.changed('wired_backend'))
         self.wired_service = self.field('wired_service','认证服务',value='internet')
@@ -154,6 +162,11 @@ class CampusUI:
             ft.Row([ft.TextButton("自动查找", icon=ft.Icons.SEARCH_ROUNDED, on_click=self.discover),
                     ft.TextButton("选择目录", icon=ft.Icons.FOLDER_OPEN_ROUNDED, on_click=self.browse)], wrap=True),
         ], visible=False, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.compatibility_label = ft.Text('进入设置后检测兼容备选', size=12, color=MUTED)
+        self.wired_options = ft.Container(ft.Column([
+            self.wired_backend, self.compatibility_label, self.client_options,
+        ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+            bgcolor='#F7F9FA', padding=16, border_radius=12)
         self.band = ft.Dropdown(label="热点频段", value="2.4GHz",
             width=float("inf"), menu_width=240,
             options=[ft.DropdownOption(key=n, text=n) for n in ["2.4GHz", "5GHz", "自动"]],
@@ -233,8 +246,7 @@ class CampusUI:
     def settings_view(self):
         general = self.card([
             ft.Text("常规", size=18, weight=ft.FontWeight.W_600),
-            self.wired_backend,
-            self.client_options,
+            self.connection_mode, self.wired_options,
             ft.Divider(color=LINE), self.auto_login, self.legacy,
             self.startup, self.startup_label,
         ])
@@ -341,7 +353,37 @@ class CampusUI:
 
     async def show_settings(self, e=None):
         self._nav("settings")
-        self.spawn(self.read("startup", self.service.read_startup_state, self._show_startup))
+        self.spawn(self.refresh_startup())
+        self.spawn(self.refresh_compatibility())
+
+    async def refresh_startup(self):
+        # System startup is independent of authentication. Do not discard its
+        # result every time a network mutation starts or finishes.
+        if self.startup_changing:
+            return
+        self.startup_revision += 1
+        revision = self.startup_revision
+        try:
+            state = await asyncio.to_thread(self.service.read_startup_state)
+        except Exception:
+            state = None
+        if not self.jobs.closed and revision == self.startup_revision:
+            self._show_startup(state)
+            self.update()
+
+    async def refresh_compatibility(self):
+        if self.connection_mode.value == 'wireless':
+            return
+        values = self.values()
+        def apply(result):
+            if values.get('client_dir') == self.client.value and isinstance(result, dict):
+                self.compatibility_label.value = result.get('message', '兼容备选暂未确认')
+        await self.read('compatibility', lambda: self.service.compatibility_status(values), apply)
+
+    def _show_connection_options(self):
+        self.wired_options.visible = self.connection_mode.value != 'wireless'
+        self.client_options.visible = self.wired_backend.value == 'native'
+        self.compatibility_label.visible = self.wired_backend.value != 'independent'
 
     async def read(self, key, fn, apply, *, error_message=None):
         ticket = self.jobs.begin_read(key)
@@ -377,16 +419,33 @@ class CampusUI:
         usable = self.legacy.value or (not self.credential_error and self.username.value and self.password.value)
         requested = auto_connect or bool(self.settings and self.auto_login.value)
         if requested and usable and not self.manual_action and not ({"username", "password", "legacy_saved_login"} & self.dirty):
-            await self.connect(automatic=True)
+            self.connection_inputs = self._connection_inputs()
+            if not self.startup_waiting or await self.startup_admitted():
+                await self.connect(automatic=True)
         else:
             self.spawn(self.refresh_hotspot())
         if not self.preview and not self.network_watch_started:
             self.network_watch_started = True
             self.spawn(self.watch_network())
 
+    async def startup_admitted(self):
+        values, inputs = self.values(), self._connection_inputs()
+        result = await asyncio.to_thread(self.service.startup_decision, values)
+        if (self.jobs.closed or self.jobs.mutation_busy or not self.startup_waiting or
+                values != self.values() or inputs != self._connection_inputs()):
+            return False
+        self.next_startup_check = time.monotonic() + 30
+        if isinstance(result, dict) and result.get('connect') is True:
+            self.startup_waiting = False
+            return True
+        if isinstance(result, dict):
+            self.set_status(result.get('message', '等待可用校园网'))
+            self.update()
+        return False
+
     def _connection_inputs(self):
         return (self.username.value, self.password.value, self.legacy.value,
-                self.wired_backend.value)
+                self.wired_backend.value, self.connection_mode.value)
 
     async def watch_network(self):
         """Debounce media changes. Never retry a rejected password on a timer."""
@@ -411,6 +470,10 @@ class CampusUI:
                     self.connection_inputs != self._connection_inputs()):
                 last = candidate = None
                 samples = 0
+                continue
+            if self.startup_waiting:
+                if time.monotonic() >= self.next_startup_check and await self.startup_admitted():
+                    await self.connect(automatic=True)
                 continue
             state = self.last_wired_status or {}
             if state.get('retryable'):
@@ -470,14 +533,14 @@ class CampusUI:
     def _apply_settings(self, values):
         self.settings = dict(values)
         for name, control in self.setting_fields().items():
-            if name in {"ethernet_guid", "connection_mode", "wired_service"}:
+            if name in {"ethernet_guid", "wired_service"}:
                 continue
             if name not in self.dirty and name in values:
                 control.value = values[name]
         if self.adapters is not None:
             self._apply_adapters(self.adapters)
         self._apply_legacy()
-        self.client_options.visible = self.wired_backend.value == "native"
+        self._show_connection_options()
 
     def _apply_adapters(self, rows):
         self.adapters = rows
@@ -488,7 +551,8 @@ class CampusUI:
         up = [r for r in physical if r.get("status") == "Up"]
         up.sort(key=lambda r: (r['guid'] != selected, str(r['guid'])))
         self.ethernet.value = up[0]['guid'] if up else None
-        self.network_label.value = "有线网络 · 自动选择" if up else "自动连接 JNU 无线"
+        self.network_label.value = ("JNU 无线网络" if self.connection_mode.value == 'wireless' else
+            "有线网络 · 自动选择" if up else "等待有线连接" if self.connection_mode.value == 'wired' else "自动连接 JNU 无线")
 
     async def wait_preferences(self):
         # Preserve saved preferences if a user acts immediately after launch.
@@ -517,7 +581,7 @@ class CampusUI:
 
     def values(self):
         values = {key: control.value for key, control in self.setting_fields().items()}
-        values.update(connection_mode="auto", wired_service="internet")
+        values.update(wired_service="internet")
         return values
 
     def _apply_legacy(self):
@@ -530,6 +594,9 @@ class CampusUI:
         self.update()
 
     def _show_startup(self, state):
+        if type(state) is not bool and self.startup_state is not None:
+            self.startup_label.value = '暂未读到系统状态 · 保留上次确认结果'
+            return
         self.startup_state = state if type(state) is bool else None
         self.startup.value = state is True
         self.startup_label.value = ("已开启 · 登录后约 30 秒启动" if state is True else
@@ -661,13 +728,14 @@ class CampusUI:
                     else:
                         self.spawn(self.refresh_hotspot())
                         if self.current_view == 'settings' and self.startup_state is None:
-                            self.spawn(self.read('startup', self.service.read_startup_state, self._show_startup))
+                            self.spawn(self.refresh_startup())
 
     async def connect(self, e=None, *, automatic=False):
         await self.wait_preferences()
         if self.jobs.mutation_busy:
             return
-        if self.wired_active and (self.last_wired_status or {}).get('ready',True) and not automatic:
+        if (self.wired_active and (self.last_wired_status or {}).get('ready',True) and not automatic and
+                (self.connection_inputs is None or self.connection_inputs == self._connection_inputs())):
             self.connection_inputs=None
             self.recovery_pending=False
             await self.action(lambda log:self.service.disconnect(),'正在断开校园网…')
@@ -681,6 +749,7 @@ class CampusUI:
             return
         values, remember = self.values(), bool(self.remember.value)
         if not automatic:
+            self.startup_waiting = False
             self.recovery_attempts = 0
             self.recovery_pending = False
         self.connection_inputs = self._connection_inputs()
@@ -692,9 +761,11 @@ class CampusUI:
             target = self.service.connection_target(values)
             if isinstance(target, tuple):
                 self.last_attempt_target = target
-            return self.service.connect(values, credentials, remember, self.cancel, log,
+            selected_values = dict(values, ethernet_guid=target[1]) if isinstance(target, tuple) and target[0] == 'wired' else values
+            return self.service.connect(selected_values, credentials, remember, self.cancel, log,
                                         require_ethernet=automatic)
         await self.action(perform, "正在检查网络连接…" if automatic else "正在连接校园网…")
+        await self.read('wired-status', self.service.wired_status, self._apply_wired_status)
 
     async def open_logs(self, e=None):
         try:
@@ -749,6 +820,8 @@ class CampusUI:
             self._show_startup(self.startup_state)
             self.update()
             return
+        self.startup_revision += 1
+        self.startup_changing = True
         values = self.values()
         done_ok=False
         def done(result):
@@ -756,9 +829,12 @@ class CampusUI:
             done_ok=True
             self._show_startup(result.get("enabled"))
             self.set_status("自启动设置已更新")
-        await self.action(lambda log: self.service.set_startup(enabled, values, log), "正在设置自启动…", done)
+        try:
+            await self.action(lambda log: self.service.set_startup(enabled, values, log), "正在设置自启动…", done)
+        finally:
+            self.startup_changing = False
         if not done_ok:
-            await self.read('startup',self.service.read_startup_state,self._show_startup)
+            await self.refresh_startup()
 
     async def discover(self, e=None):
         revision = self.client.value
@@ -913,6 +989,10 @@ class PreviewService:
     def read_startup_state(self):
         time.sleep(1.5)
         return False
+    def compatibility_status(self, values):
+        return {'supported': False, 'message': '未检测到可用的兼容备选'}
+    def startup_decision(self, values):
+        return {'connect': True, 'reason': 'preview', 'message': '预览'}
     def connect(self, values, credentials, remember, cancel, log, *, require_ethernet=False):
         self.connected = True
         return {"message": "已连接校园网", "authenticated": True}
@@ -1049,9 +1129,10 @@ def main():
             from utils.instance_guard import InstanceGuard
             guard = InstanceGuard(data_dir)
             if not guard.acquire():
-                ctypes.windll.user32.MessageBoxW(None, "程序已运行，请从系统托盘打开。", "校园网", 0x40)
+                if not args.minimized:
+                    ctypes.windll.user32.MessageBoxW(None, "程序已运行，请从系统托盘打开。", "校园网", 0x40)
                 return 0
-        run_desktop(app, assets_dir=str(resource_path("icon")))
+        run_desktop(app, assets_dir=str(resource_path("icon")), hidden=args.minimized)
     except Exception:
         if args.self_test:
             result["ok"] = False

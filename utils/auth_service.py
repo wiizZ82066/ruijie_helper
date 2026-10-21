@@ -28,6 +28,8 @@ from utils.credential_store import Credentials, CredentialStore, CredentialStore
 from utils.hotspot import HotspotManager
 from utils.network_diagnostics import collect_network_diagnostics
 from utils.connection_events import LocalJournal, ProgressMessage
+from utils.wired_native_session import NativeSessionMonitor
+from utils.wired_network import NetworkUnavailable
 
 try:
     from utils.auth_credentials import prepare_credentials, read_saved_credentials
@@ -41,7 +43,7 @@ DEFAULT_SETTINGS = {
     "ethernet_guid": None, "ssid": "ovo", "hotspot_key": "12345678",
     "band": "2.4GHz", "legacy_saved_login": False,
     "connection_mode": "auto",
-    "wired_backend": "independent", "wired_service": "internet",
+    "wired_backend": "auto", "wired_service": "internet",
 }
 
 _STARTUP_QUERY = r'''$ErrorActionPreference='Stop'
@@ -85,6 +87,10 @@ def _safe_errors(method):
                 session=getattr(self._trace,'session',''),operation=method.__name__,error_type=type(error).__name__)
             raise  # This API deliberately provides non-sensitive typed errors.
         except Exception as error:
+            if connection and self._wired_session is None and self._native_session is None and self._last_wired_status is None:
+                self._last_wired_status = dict(connection_kind='wired', active=False,
+                    ready=False, authenticated=False, retryable=isinstance(error, NetworkUnavailable),
+                    message=self._redact(str(error)))
             self.journal.write('operation_error', self._redact(str(error)),
                 session=getattr(self._trace,'session',''), operation=method.__name__,
                 duration_ms=round((time.monotonic()-began)*1000),error_type=type(error).__name__)
@@ -113,6 +119,7 @@ class CampusService:
         self._wireless_session = None
         self._wireless_next_keepalive = 0.0
         self._wired_session = None
+        self._native_session = None
         self._last_wired_status = None
         self._journal_wired_status = None
         self._trace = threading.local()
@@ -190,7 +197,7 @@ class CampusService:
             elif name == "connection_mode":
                 valid = value in ("wired", "wireless", "auto")
             elif name == "wired_backend":
-                valid = value in ("independent", "native")
+                valid = value in ("auto", "independent", "native")
             elif name == "wired_service":
                 valid = isinstance(value,str) and value.isascii() and 1<=len(value)<=32 and all(ord(c)>=32 for c in value)
             if not valid:
@@ -264,6 +271,25 @@ class CampusService:
     def discover_client(self, saved_path=None):
         return discover_client_dir(saved_path)
 
+    def compatibility_status(self, values):
+        """Read-only capability check; never install, start or read credentials."""
+        try:
+            directory = self._require_client(values)
+            state = CoreInstaller(directory, data_dir=self.data_dir).status()
+            supported = state.get('state') in ('original', 'patched') and not state.get('recovery_needed')
+            return {'supported': supported, 'message': '兼容备选可用' if supported else '客户端版本不受支持或需要恢复'}
+        except Exception:
+            return {'supported': False, 'message': '未检测到可用的兼容备选'}
+
+    def startup_decision(self, values):
+        from utils.startup_network import decision
+        try:
+            result = decision(values, self.connection_target(values))
+        except Exception:
+            result = {'connect': False, 'reason': 'network_not_ready', 'message': '等待网络就绪'}
+        self.journal.write('startup_network_check', result['message'], reason=result['reason'])
+        return result
+
     def list_adapters(self):
         return [item for item in WindowsOperations().list_adapters()
                 if item.get("if_type") == 6 and item.get("hardware_interface") is True
@@ -279,7 +305,7 @@ class CampusService:
             up = [r for r in self.list_adapters() if r.get("status") == "Up" and
                   r.get("if_type") == 6 and r.get("hardware_interface") is True]
             selected = values.get("ethernet_guid")
-            if mode == "auto" and up:
+            if up:
                 # Keep an available previous interface, otherwise choose a
                 # stable physical interface. Never pin a removed USB adapter.
                 up.sort(key=lambda r: (r.get('guid') != selected, str(r.get('guid', ''))))
@@ -360,7 +386,7 @@ class CampusService:
             mode = values.get("connection_mode", "wired")
             if mode not in ("wired", "wireless", "auto"):
                 raise ValueError("连接方式无效。")
-            if mode != "wired":
+            if mode != 'wired':
                 target, guid = self.connection_target(values)
                 if target == "ambiguous":
                     raise ValueError("检测到多张有线网卡，请先在设置中选择。")
@@ -383,82 +409,116 @@ class CampusService:
                 if cancel.is_set():
                     return self._cancelled()
             self._wireless_session = None
-            if values.get('wired_backend', 'independent') == 'independent':
-                return self._connect_independent(values, credentials, remember, cancel, emit)
-            self._close_wired()
-            native_saved = bool(values.get("legacy_saved_login", False))
-            client_dir = self._require_client(values)
-            if native_saved:
-                if read_saved_credentials is None:
-                    raise RuntimeError("此版本暂不支持读取锐捷保存的账号，请更新后再试。")
-                credentials = read_saved_credentials(client_dir)
-                self._remember(credentials=credentials)
-            elif not isinstance(credentials, Credentials):
-                raise ValueError("请输入校园账号和密码。")
-            if credentials is not None and prepare_credentials is None:
-                raise RuntimeError("此版本尚未支持账号登录，请更新后再试。")
-            value = self.save_settings(dict(values, client_dir=str(client_dir)))
-            if not native_saved:
-                self.credential_store.save(credentials, remember=remember)
-            log_before = capture_auth_log(client_dir)
-            before, began = result_snapshot(client_dir), time.time()
-            installer = CoreInstaller(client_dir, data_dir=self.data_dir)
-            current = installer.status()
-            state = current.get("state")
-            if state in ("original", "patched") and (state == "original" or current.get("recovery_needed")):
-                emit("正在备份和校验核心，并完成锐捷服务状态恢复。")
-                installer.install(log=emit)
-            elif state != "patched":
-                raise RuntimeError("认证核心缺失或版本未核验，已停止。请先恢复原版 8021x.exe。")
-            if cancel.is_set():
-                return self._cancelled()
-            if credentials is not None:
-                # This operation starts the new core before restoring the native
-                # service. Its baseline must replace every older account result.
-                prepared = prepare_credentials(client_dir, credentials, log=emit, data_dir=self.data_dir)
-                if (not isinstance(prepared, dict) or "before" not in prepared or
-                        type(prepared.get("started")) not in (int, float) or
-                        not math.isfinite(prepared["started"])):
-                    raise RuntimeError("账号登录准备未完成，未继续连接。")
-                before, began = prepared["before"], prepared["started"]
-                log_before = prepared.get("log_before")
-            if cancel.is_set():
-                return self._cancelled()
-            session = start_core(client_dir, emit)
-            if not isinstance(session, CoreSession) or (credentials is not None and session.created_at < began):
-                raise RuntimeError("未能确认本次账号配置对应的认证会话。")
-            emit("等待认证结果…")
-            if not wait_authentication(client_dir, before, began, cancel, session=session,
-                                       ethernet_adapter_guid=None if credentials is not None else value["ethernet_guid"],
-                                       log_before=log_before):
-                emit("认证核心保持运行；未取得认证成功结果，暂未自动开启热点。")
-                return {"message": "认证结果暂未确认，请在设置中查看运行记录", "authenticated": False, "ready": False}
-            if cancel.is_set():
-                return self._cancelled()
-            if not value["auto_hotspot"]:
-                return {"message": "已连接校园网", "authenticated": True, "ready": True}
-            result = self._start_hotspot(value, emit, cancel=cancel)
-            result["authenticated"] = True
-            if result.get("cancelled"):
+            backend = values.get('wired_backend', 'independent')
+            if backend not in ('auto', 'independent', 'native'):
+                raise ValueError('有线认证方式无效。')
+            if backend in ('auto', 'independent'):
+                try:
+                    return self._connect_independent(values, credentials, remember, cancel, emit)
+                except RuntimeError:
+                    failed = self._last_wired_status or {}
+                    if (backend != 'auto' or cancel.is_set() or not failed.get('fallback_allowed') or
+                            self.connection_target(values)[0] != 'wired' or
+                            not self.compatibility_status(values).get('supported')):
+                        raise
+                    emit(ProgressMessage('prepare', '本程序认证暂不可用，正在切换兼容认证…'))
+            return self._connect_native(values, credentials, remember, cancel, emit)
+
+    def _connect_native(self, values, credentials, remember, cancel, emit):
+        self._close_wired()
+        adapter = self._wired_adapter(values)
+        values = dict(values, ethernet_guid=adapter['guid'])
+        native_saved = bool(values.get("legacy_saved_login", False))
+        client_dir = self._require_client(values)
+        if native_saved:
+            if read_saved_credentials is None:
+                raise RuntimeError("此版本暂不支持读取锐捷保存的账号，请更新后再试。")
+            credentials = read_saved_credentials(client_dir)
+            self._remember(credentials=credentials)
+        elif not isinstance(credentials, Credentials):
+            raise ValueError("请输入校园账号和密码。")
+        if credentials is not None and prepare_credentials is None:
+            raise RuntimeError("此版本尚未支持账号登录，请更新后再试。")
+        value = self.save_settings(dict(values, client_dir=str(client_dir)))
+        if not native_saved:
+            self.credential_store.save(credentials, remember=remember)
+        log_before = capture_auth_log(client_dir)
+        before, began = result_snapshot(client_dir), time.time()
+        installer = CoreInstaller(client_dir, data_dir=self.data_dir)
+        current = installer.status()
+        state = current.get("state")
+        if state in ("original", "patched") and (state == "original" or current.get("recovery_needed")):
+            emit("正在备份和校验核心，并完成锐捷服务状态恢复。")
+            installer.install(log=emit)
+        elif state != "patched":
+            raise RuntimeError("认证核心缺失或版本未核验，已停止。请先恢复原版 8021x.exe。")
+        if cancel.is_set():
+            return self._cancelled()
+        if credentials is not None:
+            # This operation starts the new core before restoring the native
+            # service. Its baseline must replace every older account result.
+            adapter_name = adapter.get('interface_description')
+            prepared = prepare_credentials(client_dir, credentials, log=emit, data_dir=self.data_dir,
+                                           adapter_name=adapter_name)
+            if (not isinstance(prepared, dict) or "before" not in prepared or
+                    type(prepared.get("started")) not in (int, float) or
+                    not math.isfinite(prepared["started"])):
+                raise RuntimeError("账号登录准备未完成，未继续连接。")
+            before, began = prepared["before"], prepared["started"]
+            log_before = prepared.get("log_before")
+        if cancel.is_set():
+            return self._cancelled()
+        session = start_core(client_dir, emit)
+        if not isinstance(session, CoreSession) or (credentials is not None and session.created_at < began):
+            raise RuntimeError("未能确认本次账号配置对应的认证会话。")
+        monitor = NativeSessionMonitor(client_dir, session, value['ethernet_guid'], emit)
+        self._native_session = monitor
+        try:
+            emit(ProgressMessage('authenticate', '等待兼容认证结果…'))
+            accepted = wait_authentication(client_dir, before, began, cancel, session=session,
+                ethernet_adapter_guid=None if credentials is not None else value['ethernet_guid'], log_before=log_before)
+            if not accepted or cancel.is_set():
+                self._close_wired()
+                # A native timeout can include rejected credentials. Do not
+                # automatically resubmit an unclassified authentication failure.
+                result = dict(connection_kind='wired', backend='native', active=False,
+                    ready=False, authenticated=False, retryable=False,
+                    message='已取消连接' if cancel.is_set() else '兼容认证未通过，请检查账号、网卡和运行记录')
+                self._last_wired_status = result
                 return result
-            result["message"] = "已连接校园网" if result["ready"] else (
-                "已连接，热点共享未就绪" if result["hotspot"] else "已连接，热点未能开启")
+            emit(ProgressMessage('verify', '正在验证兼容认证的有线出口…'))
+            verified = monitor.verify(cancel)
+            if not verified.get('ready'):
+                self._close_wired()
+                verified['active'] = False
+                self._last_wired_status = verified
+                return verified
+        except BaseException:
+            self._close_wired()
+            raise
+        emit(ProgressMessage('complete', verified['message']))
+        if not value["auto_hotspot"]:
+            return verified
+        result = self._start_hotspot(value, emit, cancel=cancel)
+        result["authenticated"] = True
+        if result.get("cancelled"):
             return result
+        result["message"] = "已连接校园网" if result["ready"] else (
+            "已连接，热点共享未就绪" if result["hotspot"] else "已连接，热点未能开启")
+        return result
 
     def _close_wired(self):
         if self._wired_session is not None:
             self._wired_session.close()
             self._wired_session = None
+        if self._native_session is not None:
+            self._native_session.close()
+            self._native_session = None
         self._last_wired_status = None
 
     def _connect_independent(self, values, credentials, remember, cancel, emit):
         from utils.wired_auth import WiredClient
-        rows=[r for r in self.list_adapters() if r.get('status')=='Up']
-        selected=values.get('ethernet_guid')
-        if selected:
-            rows=[r for r in rows if str(r['guid']).casefold()==str(selected).casefold()]
-        if len(rows)!=1:
-            raise ValueError('请插入网线并选择一张实体有线网卡。')
+        adapter = self._wired_adapter(values)
         if values.get('legacy_saved_login'):
             if read_saved_credentials is None:
                 raise RuntimeError('暂不支持导入原客户端账号，请手动输入。')
@@ -466,11 +526,11 @@ class CampusService:
             self._remember(credentials=credentials)
         if not isinstance(credentials,Credentials):
             raise ValueError('请输入校园账号和密码。')
-        value=self.save_settings(dict(values,ethernet_guid=rows[0]['guid']))
+        value=self.save_settings(dict(values,ethernet_guid=adapter['guid']))
         if not values.get('legacy_saved_login'):
             self.credential_store.save(credentials,remember=remember)
         self._close_wired()
-        client=WiredClient(rows[0]['guid'],value['wired_service'])
+        client=WiredClient(adapter['guid'],value['wired_service'])
         self._wired_session=client
         try:
             result=client.connect(credentials,cancel,emit)
@@ -489,8 +549,16 @@ class CampusService:
                 result['message']='已连接校园网，热点共享未就绪'
         return result
 
+    def _wired_adapter(self, values):
+        rows = [r for r in self.list_adapters() if r.get('status') == 'Up']
+        if not rows:
+            raise NetworkUnavailable('有线网卡暂时不可用，等待网络恢复…')
+        selected = str(values.get('ethernet_guid', '')).casefold()
+        rows.sort(key=lambda row: (str(row['guid']).casefold() != selected, str(row['guid'])))
+        return rows[0]
+
     def wired_status(self):
-        client=self._wired_session
+        client=self._wired_session or self._native_session
         result=client.snapshot() if client is not None else self._last_wired_status
         if isinstance(result,dict) and result!=self._journal_wired_status:
             self._journal_wired_status=dict(result)

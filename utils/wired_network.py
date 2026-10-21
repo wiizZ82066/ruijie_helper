@@ -7,6 +7,10 @@ from uuid import UUID
 from utils.campus_connection import WindowsOperations
 
 
+class NetworkUnavailable(RuntimeError):
+    """Transient adapter / Windows network-service failure."""
+
+
 def _run(script, timeout=20):
     prefix = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
     try:
@@ -15,9 +19,9 @@ def _run(script, timeout=20):
             capture_output=True, encoding='utf-8', errors='replace', timeout=timeout,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     except subprocess.TimeoutExpired:
-        raise RuntimeError('网络服务尚未就绪，请稍后重试。') from None
+        raise NetworkUnavailable('网络服务尚未就绪，请稍后重试。') from None
     if result.returncode:
-        raise RuntimeError('无法读取所选有线网卡，请检查网线和网卡状态。')
+        raise NetworkUnavailable('有线网卡暂时不可用，等待网络恢复…')
     return json.loads(result.stdout)
 
 

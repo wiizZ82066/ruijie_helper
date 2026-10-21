@@ -67,6 +67,11 @@ class AuthServiceTests(unittest.TestCase):
         self.hotspot_status = self.mocked("utils.auth_service.HotspotManager.get_hotspot_status", return_value="未启动")
         self.diagnostics = self.mocked("utils.auth_service.collect_network_diagnostics", return_value={"findings": []})
         self.startup = self.mocked("utils.auth_service.configure_startup", side_effect=lambda enabled, **_: {"enabled": enabled})
+        self.mocked('utils.auth_service.WindowsOperations.list_adapters', return_value=[
+            dict(guid=GUID, if_type=6, hardware_interface=True, status='Up', interface_description='Synthetic Ethernet')])
+        self.monitor = self.mocked('utils.auth_service.NativeSessionMonitor', autospec=True).return_value
+        self.monitor.verify.return_value = dict(connection_kind='wired', backend='native',
+            authenticated=True, ready=True, active=True, retryable=False, message='已连接校园网 · 兼容认证')
 
     def tearDown(self):
         for secret in (ACCOUNT, PASSWORD, KEY):

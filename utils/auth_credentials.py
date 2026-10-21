@@ -318,7 +318,7 @@ def _encoded_text(text: str) -> bytes:
     return encode_profile(_native_bytes(text))
 
 
-def _build_profiles(client_dir: Path, credentials: Credentials, material: bytes):
+def _build_profiles(client_dir: Path, credentials: Credentials, material: bytes, *, adapter_name=None):
     username = credentials.username
     if username != username.strip() or not username or len(_native_bytes(username)) > 128 or any(ord(c) < 32 for c in username):
         raise CredentialPreparationError("账号为空、过长或包含客户端不支持的空白字符。")
@@ -336,6 +336,13 @@ def _build_profiles(client_dir: Path, credentials: Credentials, material: bytes)
     if template is None or not template.is_file():
         raise CredentialPreparationError("缺少可复用的原客户端用户配置，请先完成一次网卡和认证方式配置。")
     user_text = _text(template.read_bytes())
+    if adapter_name is not None:
+        if (not isinstance(adapter_name, str) or not adapter_name or len(adapter_name) > 256 or
+                any(ord(c) < 32 or c in '[];=' for c in adapter_name)):
+            raise CredentialPreparationError('所选有线网卡名称无效。')
+        user_text = _set(user_text, 'PUBLIC', 'Adapter', adapter_name)
+        user_text = _set(user_text, 'PUBLIC', 'AuthModeMediaType', 'Wire')
+        user_text = _set(user_text, 'PUBLIC', 'AuthMode', 'EAPMD5')
     cipher = encrypt_native_password(credentials.password, material)
     for key, value in {"Password": cipher, "UserPassword": cipher, "SaveCheck": "1", "RunConnect": "1"}.items():
         user_text = _set(user_text, "PUBLIC", key, value)
@@ -355,7 +362,7 @@ def _build_profiles(client_dir: Path, credentials: Credentials, material: bytes)
     return [(target, _encoded_text(user_text)), (global_path, _encoded_text(global_text))]
 
 
-def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _: None, *, data_dir=None, operations=None, material_provider=None) -> dict:
+def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _: None, *, data_dir=None, operations=None, material_provider=None, adapter_name=None) -> dict:
     """Stop only the verified installation, atomically prepare, restore service.
 
     Return the result baseline and timestamp captured before the service can
@@ -378,7 +385,7 @@ def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _
             raise CredentialPreparationError("账号输入格式无效。")
         material = (material_provider or _machine_material)()
         # Parse and encode in memory before touching a process or a live file.
-        proposed = _build_profiles(client_dir, credentials, material)
+        proposed = _build_profiles(client_dir, credentials, material, adapter_name=adapter_name)
         with installer._exclusive():
             _, patched, _ = installer._material()
             if core_patch.digest(installer.target.read_bytes()) != core_patch.digest(patched):
@@ -400,7 +407,7 @@ def prepare_credentials(client_dir: Path, credentials: Credentials, log=lambda _
                     raise CredentialPreparationError("认证核心尚未退出，未写入账号。")
                 # The core may flush settings while shutting down. Rebuild from
                 # its final files rather than replacing unrelated final changes.
-                proposed = _build_profiles(client_dir, credentials, material)
+                proposed = _build_profiles(client_dir, credentials, material, adapter_name=adapter_name)
                 for path, content in proposed:
                     old = path.read_bytes() if path.exists() else None
                     path.parent.mkdir(parents=True, exist_ok=True)

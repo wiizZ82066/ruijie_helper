@@ -248,7 +248,7 @@ def _replace_attribute(target, name, value):
         setattr(target, name, previous)
 
 
-def run_desktop(main, *, assets_dir=None) -> None:
+def run_desktop(main, *, assets_dir=None, hidden=False) -> None:
     """Run one pinned native view with peer verification and no web fallback."""
     if sys.platform != "win32":
         raise DesktopRuntimeError("This desktop launcher requires Windows.")
@@ -275,7 +275,8 @@ def run_desktop(main, *, assets_dir=None) -> None:
                 _replace_attribute(flet_desktop, "open_flet_view_async", guard.launch), \
                 _replace_attribute(flet_desktop, "close_flet_view", guard.cleanup), \
                 _replace_attribute(app_module, "ensure_flet_desktop_package_installed", _check_versions):
-            ft.run(main, view=ft.AppView.FLET_APP, assets_dir=assets_dir, port=0)
+            ft.run(main, view=ft.AppView.FLET_APP_HIDDEN if hidden else ft.AppView.FLET_APP,
+                   assets_dir=assets_dir, port=0)
     finally:
         guard.cleanup()
         for key in list(os.environ):

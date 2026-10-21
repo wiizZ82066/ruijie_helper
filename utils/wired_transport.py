@@ -4,7 +4,35 @@ import os
 from pathlib import Path
 
 class ProbeError(RuntimeError):
-    pass
+    """Safe categories; a lost handle is not evidence of a missing driver."""
+    TRANSIENT = frozenset({'pcap_enumeration_failed', 'target_not_available_in_pcap',
+                          'pcap_open_failed', 'capture_read_failed', 'send_failed'})
+    MESSAGES = {
+        'driver_missing': '未找到抓包驱动，请安装 WinPcap 或兼容的 Npcap。',
+        'driver_load_failed': '抓包驱动组件无法加载，请检查安装是否完整。',
+        'driver_access_denied': '抓包驱动访问被拒绝，请以管理员身份运行。',
+        'target_not_available_in_pcap': '有线网卡正在恢复，等待重新打开认证通道…',
+        'capture_read_failed': '有线认证通道已断开，等待重新连接…',
+        'send_failed': '有线认证报文暂时无法发送，等待重新连接…',
+        'pcap_open_failed': '暂时无法打开有线认证通道，等待重试…',
+        'pcap_enumeration_failed': '抓包驱动暂时无法读取网卡，等待重试…',
+    }
+
+    def __init__(self, kind):
+        self.kind = kind if kind in self.MESSAGES or kind in {
+            'not_ethernet_datalink', 'nonblocking_capture_failed', 'invalid_native_port_filter',
+            'capture_filter_compile_failed', 'capture_filter_failed', 'outgoing_frame_outside_scope'
+        } else 'capture_error'
+        self.retryable = self.kind in self.TRANSIENT
+        super().__init__(self.MESSAGES.get(self.kind, '无法配置有线认证通道，请检查驱动兼容性。'))
+
+
+def _open_error(kind, detail):
+    # Driver strings can include local paths / adapter IDs. Classify in memory.
+    lowered = detail.lower()
+    if any(word in lowered for word in (b'access is denied', b'access denied', b'permission denied')):
+        kind = 'driver_access_denied'
+    return ProbeError(kind)
 
 class Header(C.Structure):
     _fields_ = [('sec', C.c_int32), ('usec', C.c_int32),
@@ -32,9 +60,13 @@ class Pcap:
         if (system / 'Npcap' / 'wpcap.dll').is_file():
             system = system / 'Npcap'
         if not (system / 'wpcap.dll').is_file():
-            raise ProbeError('未找到抓包驱动，请安装兼容的 Npcap（WinPcap API）后重试。')
+            raise ProbeError('driver_missing')
         # Explicit system path; dependencies search the DLL directory and System32.
-        self.dll = C.CDLL(str(system / 'wpcap.dll'), winmode=0x100 | 0x800)
+        try:
+            self.dll = C.CDLL(str(system / 'wpcap.dll'), winmode=0x100 | 0x800)
+        except OSError as error:
+            raise ProbeError('driver_access_denied' if getattr(error, 'winerror', None) == 5
+                             else 'driver_load_failed') from None
         signatures = {
             'pcap_findalldevs': ([C.POINTER(C.POINTER(Device)), C.c_char_p], C.c_int),
             'pcap_freealldevs': ([C.POINTER(Device)], None),
@@ -54,7 +86,7 @@ class Pcap:
         err = C.create_string_buffer(256)
         first = C.POINTER(Device)()
         if self.dll.pcap_findalldevs(C.byref(first), err):
-            raise ProbeError('pcap_enumeration_failed')
+            raise _open_error('pcap_enumeration_failed', err.value)
         wanted = ('\\Device\\NPF_{' + config['guid'] + '}').encode('ascii')
         selected = None
         try:
@@ -69,7 +101,7 @@ class Pcap:
             raise ProbeError('target_not_available_in_pcap')
         self.handle = self.dll.pcap_open_live(selected, 2048, 0, 100, err)
         if not self.handle:
-            raise ProbeError('pcap_open_failed')
+            raise _open_error('pcap_open_failed', err.value)
         try:
             if self.dll.pcap_datalink(self.handle) != 1:
                 raise ProbeError('not_ethernet_datalink')

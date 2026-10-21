@@ -6,6 +6,8 @@ import time
 import unittest
 from unittest.mock import Mock,patch
 from utils.wired_auth import WiredClient, RecoverableError
+from utils.wired_transport import ProbeError
+from utils.wired_network import NetworkUnavailable
 from utils.wired_eapol import EthernetEapol,EapPacket
 from utils.credential_store import Credentials
 import test_wired_vendor
@@ -114,6 +116,40 @@ class WiredAuthTests(unittest.TestCase):
         self.capture.side_effect=OSError('synthetic driver missing')
         with self.assertRaises(RuntimeError): self.client.connect(self.credentials,self.cancel)
         self.handoff.pause.assert_not_called()
+
+    def test_capture_read_loss_after_success_is_recoverable_and_closes_old_handle(self):
+        events=[]
+        self.client.connect(self.credentials,self.cancel,events.append)
+        self.switch.receive=Mock(side_effect=ProbeError('capture_read_failed'))
+        self.client._thread.join(3)
+        state=self.client.snapshot()
+        self.assertTrue(state['retryable'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(state['reason'],'capture_read_failed')
+        self.assertTrue(self.switch.closed)
+        self.assertNotIn('安装',state['message'])
+        self.assertTrue(any(getattr(e,'event','')=='session_error' and
+                            e.fields['reason']=='capture_read_failed' for e in events))
+        replacement=WiredClient(GUID)
+        self.addCleanup(replacement.close)
+        fresh=Switch(); self.capture.return_value=fresh
+        self.assertTrue(replacement.connect(self.credentials,self.cancel)['ready'])
+        self.assertIsNot(fresh,self.switch)
+
+    def test_missing_driver_does_not_loop_but_can_offer_compatible_fallback(self):
+        self.capture.side_effect=ProbeError('driver_missing')
+        with self.assertRaisesRegex(RuntimeError,'未找到'):
+            self.client.connect(self.credentials,self.cancel)
+        self.assertFalse(self.client.snapshot()['retryable'])
+        self.assertTrue(self.client.snapshot()['fallback_allowed'])
+        self.handoff.pause.assert_not_called()
+
+    def test_adapter_reenumeration_is_recoverable_before_capture_opens(self):
+        self.cfg.side_effect=NetworkUnavailable('有线网卡暂时不可用')
+        with self.assertRaises(RuntimeError):
+            self.client.connect(self.credentials,self.cancel)
+        self.assertTrue(self.client.snapshot()['retryable'])
+        self.capture.assert_not_called()
     def test_changed_interface_between_rounds_rejected(self):
         other=deepcopy(CONFIG);other['mac_bytes']=bytes.fromhex('020000000003')
         self.cfg.side_effect=[deepcopy(CONFIG),other]

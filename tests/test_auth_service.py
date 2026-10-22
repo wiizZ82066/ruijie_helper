@@ -25,6 +25,16 @@ PASSWORD = 'synthetic-login"$123'
 
 
 class AuthServiceTests(unittest.TestCase):
+    def test_runtime_diagnostics_keep_exit_code_but_no_exception_text(self):
+        self.service.record_runtime_event('runtime_failed', error=ValueError('secret-account secret-password'))
+        self.service.record_runtime_event('desktop_exit', exit_code=-1073741819)
+        self.service.record_runtime_event('unknown-event-secret')
+        lines = self.service.journal.path.read_text(encoding='utf-8').splitlines()
+        rows = [json.loads(line) for line in lines]
+        self.assertEqual(rows[-2]['error_type'], 'ValueError')
+        self.assertEqual(rows[-1]['outcome'], '0xC0000005')
+        self.assertNotIn('secret', '\n'.join(lines))
+
     def mocked(self, target, **kwargs):
         patcher = patch(target, **kwargs)
         result = patcher.start()

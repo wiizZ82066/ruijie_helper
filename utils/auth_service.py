@@ -176,6 +176,26 @@ class CampusService:
     def record_ui_event(self, message):
         self.journal.write('ui', message)
 
+    def record_runtime_event(self, event, *, error=None, exit_code=None):
+        from utils.app_version import VERSION
+        messages = {
+            'runtime_start': '助手启动', 'runtime_failed': '助手运行异常',
+            'runtime_end': '助手进程结束', 'cleanup_failed': '会话清理异常',
+            'desktop_started': '界面进程已启动', 'desktop_exit': '界面进程已退出',
+            'ui_task_failed': '后台界面任务异常', 'ui_exit_requested': '用户请求退出',
+            'ui_error': '界面报告错误',
+        }
+        if event not in messages:
+            return
+        # Never serialize exception messages, tracebacks, Flet control state,
+        # command lines or locals: they may contain account/password values.
+        fields = {'reason': VERSION}
+        if error is not None:
+            fields['error_type'] = type(error).__name__
+        if event == 'desktop_exit':
+            fields['outcome'] = f'0x{exit_code & 0xffffffff:08X}' if type(exit_code) is int else 'unknown'
+        self.journal.write(event, messages[event], **fields)
+
     @staticmethod
     def _settings(values, *, strict=False, base=None):
         if not isinstance(values, dict):

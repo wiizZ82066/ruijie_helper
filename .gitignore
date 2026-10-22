@@ -15,6 +15,7 @@ release/
 analysis/
 node_modules/
 .venv/
+.venv-build/
 venv/
 .pytest_cache/
 *.spec

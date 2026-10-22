@@ -24,7 +24,7 @@ Flet 与原版共用当前用户的配置、加密账号库和单实例锁，不
 
 ## 运行发布包
 
-安装版提供中文向导，可选择安装目录、创建桌面快捷方式、开机自启动（后台运行），以及完成后立即运行。升级前请从系统托盘退出助手；安装版卸载保留当前用户的账号和设置，不卸载网络驱动。
+安装版提供中文向导，可选择安装目录、创建桌面快捷方式，以及完成后立即运行。开机自启动在助手设置中管理，安装和升级不修改已有自启动状态。升级前请从系统托盘退出助手；安装版卸载保留当前用户的账号和设置，不卸载网络驱动。
 
 首次打开助手会在后台检查有线驱动；缺少或异常时，登录页显示说明入口，也可从“设置 → 环境检测与驱动说明”重新检查。随包附带的 [驱动安装说明](docs/driver-installation.html) 可离线查看，提供 Npcap 官网入口和安装步骤。安装包和助手都不下载、不安装 Npcap。只使用 JNU 无线时不需要该驱动；后台自启动不会弹出说明窗口。
 
@@ -56,7 +56,13 @@ Flet 与原版共用当前用户的配置、加密账号库和单实例锁，不
 
 ## 从源码运行与构建
 
-构建安装版：先准备 Inno Setup 6.7+ 及其简体中文翻译文件，再运行 `build_installer.ps1 -Compiler <ISCC.exe路径> -ChineseMessages <ChineseSimplified.isl路径>`。脚本先生成助手程序目录，再生成 Setup.exe；当前版本为 `6.2.3`，产物保存到 `release/v6.2.3`，构建过程不会发布或上传。安装版复用已有的当前用户自启动任务，参数为 `--connect --minimized`。
+构建安装版：先准备官方 NSIS 3，再运行 `build_installer.ps1 -Compiler <makensis.exe路径>`。脚本先生成助手程序目录，再生成 NSIS Setup.exe；当前源码版本为 `6.2.4`，产物保存到 `release/v6.2.4`，构建过程不会发布或上传。安装阶段不调用助手维护命令，不注册或删除自启动任务；卸载仅清理指向本安装目录的当前用户任务。
+
+如只需封装已有程序，运行 `build_installer_nsis.ps1 -Compiler <makensis.exe路径> -BundleDirectory <已有助手目录>`。它校验主 EXE 在构建前后不变，不重新打包助手；产物默认位于 `release/nsis-6.2.4`。保留目录选择、桌面快捷方式、完成后运行和卸载；安装不修改自启动。为避免两种卸载器互相覆盖，不能直接覆盖由 Inno Setup 管理的目录，应先卸载旧安装版，账号和设置会保留。旧 Inno 脚本保留用于对照，需显式指定 `-Engine Inno`、`-Compiler <ISCC.exe路径>` 和 `-ChineseMessages <ChineseSimplified.isl路径>`。
+
+构建环境建议独立于日常 Python 环境。Windows x64 / CPython 3.14 可用 `python -m venv .venv-build` 创建环境，再用该环境的 Python 执行 `-m pip install --require-hashes -r requirements-build-win64.txt` 安装固定版本和校验过的依赖。两个构建脚本均支持 `-PythonExecutable .venv-build/Scripts/python.exe`，确保版本读取、运行时检查和打包使用同一环境；不要将虚拟环境提交到仓库。
+
+若 Windows 返回错误 225/226，说明程序被安全防护拦截或隔离。请保留威胁名称和版本信息，检查“Windows 安全中心 → 病毒和威胁防护 → 保护历史记录”。安装向导会说明未完成运行验证并停止再次自动启动助手。不要通过关闭防护或添加排除项处理；哈希一致及单次扫描无威胁也不能保证后续运行一定不会被拦截。
 
 需要 Windows x64、支持移动热点的无线网卡、Windows PowerShell，以及 Python 3.10 或更新版本。构建前请用 Git 克隆仓库：构建脚本会检查 Git 跟踪及待发布文件，发现本机路径、常见凭据或不应发布的文件时停止。源码运行和构建使用同一套依赖：
 

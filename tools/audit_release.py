@@ -21,7 +21,7 @@ FORBIDDEN_DIRS = {'analysis', 'build', 'release', 'dist', 'exe', 'node_modules',
 FORBIDDEN_NAMES = {'suconfig.dat', 'userinfo.dat', 'supplicantresult.ini', 'credentials.dpapi',
                    'settings.json', 'config.json', 'nuitka-crash-report.xml'}
 FORBIDDEN_SUFFIXES = {'.dpapi', '.pcap', '.pcapng', '.etl', '.exe', '.msi', '.pyd', '.dll'}
-SOURCE_SUFFIXES = {'.py', '.ps1', '.bat', '.cjs', '.js', '.ts', '.tsx', '.json', '.md', '.txt', '.yml', '.yaml', '.iss', '.html'}
+SOURCE_SUFFIXES = {'.py', '.ps1', '.bat', '.cjs', '.js', '.ts', '.tsx', '.json', '.md', '.txt', '.yml', '.yaml', '.iss', '.nsi', '.nsh', '.html'}
 SECRET_RULES = {
     'private_key': re.compile(r'(?m)^-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'),
     'github_token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})\b'),
@@ -120,7 +120,7 @@ def audit():
                         record(relative, 'absolute_windows_path_literal', node.lineno)
             except SyntaxError:
                 record(relative, 'python_syntax')
-        elif path.suffix.lower() in {'.ps1', '.bat', '.cjs', '.js', '.ts', '.tsx'}:
+        elif path.suffix.lower() in {'.ps1', '.bat', '.cjs', '.js', '.ts', '.tsx', '.nsi', '.nsh'}:
             for number, line in enumerate(text.splitlines(), 1):
                 if ABSOLUTE_WINDOWS_PATH.search(line):
                     record(relative, 'absolute_windows_path_literal', number)

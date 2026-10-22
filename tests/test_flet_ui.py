@@ -51,7 +51,49 @@ class GatedRead:
             self.finished.set()
 
 
+class RuntimeLifetimeTests(unittest.TestCase):
+    def test_renderer_failure_closes_session_and_releases_instance(self):
+        from utils.flet_runtime import DesktopRuntimeError
+        service = Mock()
+        guard = Mock()
+        guard.acquire.return_value = True
+        native = Mock()
+        native.shell32.IsUserAnAdmin.return_value = True
+        with patch.object(gui.sys, 'argv', ['campus_flet.py']), \
+             patch.object(gui.ctypes, 'windll', native), \
+             patch('utils.auth_service.CampusService', return_value=service), \
+             patch('utils.instance_guard.InstanceGuard', return_value=guard), \
+             patch('utils.flet_runtime.run_desktop', side_effect=DesktopRuntimeError('synthetic crash')):
+            self.assertEqual(gui.main(), 1)
+        service.close.assert_called_once()
+        guard.release.assert_called_once()
+        events = [call.args[0] for call in service.record_runtime_event.call_args_list]
+        self.assertEqual(events, ['runtime_start', 'runtime_failed', 'runtime_end'])
+
+
 class FletUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_failure_is_observed_and_reported(self):
+        error = RuntimeError('synthetic secret must not be formatted')
+        async def fail():
+            raise error
+        self.ui.spawn(fail())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertFalse(self.ui.tasks)
+        self.service.record_runtime_event.assert_called_once_with('ui_task_failed', error=error)
+
+    async def test_cancelled_task_is_not_a_crash(self):
+        self.ui.spawn(asyncio.sleep(60))
+        for task in self.ui.tasks:
+            task.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.service.record_runtime_event.assert_not_called()
+
+    async def test_ui_error_never_records_raw_control_data(self):
+        await self.ui.ui_error(SimpleNamespace(data=PASSWORD))
+        self.service.record_runtime_event.assert_called_once_with('ui_error')
+
     async def test_update_check_preserves_connection_status_and_restores_version(self):
         self.ui.set_status('校园网已连接')
         self.service.check_updates.return_value = {'state': 'available', 'message': '发现新版'}

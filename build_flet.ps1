@@ -1,6 +1,7 @@
 param(
     [switch]$PrepareRuntimeOnly,
-    [string]$OutputDirectory = 'release'
+    [string]$OutputDirectory = 'release',
+    [string]$PythonExecutable = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -29,7 +30,10 @@ while ($inspectionPath -and $inspectionPath.StartsWith($releaseRoot, [System.Str
     if ($inspectionPath.Equals($releaseRoot, [System.StringComparison]::OrdinalIgnoreCase)) { break }
     $inspectionPath = Split-Path -Parent $inspectionPath
 }
-$pythonExecutable = (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+if (-not $PythonExecutable) {
+    $PythonExecutable = (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+$PythonExecutable = (Resolve-Path -LiteralPath $PythonExecutable -ErrorAction Stop).Path
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $PSScriptRoot 'build\pyinstaller-flet-cache'
 & $pythonExecutable -c 'from pathlib import Path; from utils.flet_runtime import prepare_runtime; print(prepare_runtime(Path.cwd()))'
 if ($LASTEXITCODE -ne 0) { throw 'Pinned desktop runtime preparation failed.' }

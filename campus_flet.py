@@ -12,6 +12,13 @@ import sys
 import threading
 import time
 
+# Installer and driver probes must not load Flutter/UI or account storage.
+if __name__ == '__main__':
+    from utils.maintenance_entry import run_maintenance
+    maintenance_code = run_maintenance(sys.argv[1:], entry_script=Path(__file__).resolve())
+    if maintenance_code is not None:
+        raise SystemExit(maintenance_code)
+
 import flet as ft
 
 from utils.credential_store import Credentials, CredentialStoreError
@@ -122,7 +129,24 @@ class CampusUI:
             return
         task = asyncio.create_task(coroutine)
         self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(self._task_finished)
+
+    def _task_finished(self, task):
+        self.tasks.discard(task)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                self.runtime_event('ui_task_failed', error=error)
+
+    def runtime_event(self, event, **fields):
+        try:
+            self.service.record_runtime_event(event, **fields)
+        except Exception:
+            pass
+
+    async def ui_error(self, event):
+        # Flet error data can include control values. Record only the event.
+        self.runtime_event('ui_error')
 
     def update(self):
         if not self.jobs.closed:
@@ -296,6 +320,7 @@ class CampusUI:
         self.page.on_resize = self.resized
         self.page.window.prevent_close = True
         self.page.window.on_event = self.window_event
+        self.page.on_error = self.ui_error
         self.page.window.visible = not self.minimized
         self.nav_home = self.nav_button("连接", ft.Icons.GRID_VIEW_ROUNDED, self.show_home, selected=True)
         self.nav_hotspot = self.nav_button("热点", ft.Icons.WIFI_TETHERING_ROUNDED, self.show_hotspot)
@@ -413,7 +438,7 @@ class CampusUI:
         try:
             data = await asyncio.to_thread(self.service.driver_status)
             if not isinstance(data, dict) or data.get('state') not in (
-                    'ready', 'missing', 'broken', 'denied', 'no_interfaces', 'unknown'):
+                    'ready', 'missing', 'broken', 'denied', 'no_interfaces', 'blocked', 'unknown'):
                 data = {'state': 'unknown', 'message': '暂时无法确认有线驱动状态'}
         except Exception:
             data = {'state': 'unknown', 'message': '暂时无法确认有线驱动状态'}
@@ -1061,6 +1086,7 @@ class CampusUI:
             self.set_status("正在等待当前操作安全完成…")
             self.update()
             return
+        self.runtime_event('ui_exit_requested')
         self.jobs.close()
         try:
             await asyncio.to_thread(self.service.close)
@@ -1073,6 +1099,9 @@ class CampusUI:
 
 
 class PreviewService:
+    def record_runtime_event(self, event, **fields):
+        pass
+
     def open_logs(self):
         pass
 
@@ -1191,34 +1220,23 @@ def runtime_self_test():
 
 
 def main():
+    from utils.maintenance_entry import run_maintenance
+    maintenance_code = run_maintenance(sys.argv[1:], entry_script=Path(__file__).resolve())
+    if maintenance_code is not None:
+        return maintenance_code
     parser = argparse.ArgumentParser()
     parser.add_argument("--connect", action="store_true")
     parser.add_argument("--minimized", action="store_true")
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--test-report", type=Path)
-    parser.add_argument("--check-driver", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--setup-startup", choices=['enable', 'disable', 'remove-owned'], help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.check_driver:
-        from utils.driver_setup import probe_driver, EXIT_CODES
-        return EXIT_CODES[probe_driver()['state']]
     preview = args.preview or args.self_test
     if not preview and not ctypes.windll.shell32.IsUserAnAdmin():
-        if args.setup_startup:
-            return 1  # Installer must wait for the actual elevated operation.
         arguments = sys.argv[1:] if getattr(sys, "frozen", False) else [str(Path(__file__).resolve()), *sys.argv[1:]]
         code = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
             subprocess.list2cmdline(arguments), str(Path(sys.executable).parent), 1)
         return 0 if code > 32 else 1
-    if args.setup_startup:
-        from utils.auth_startup import set_startup
-        try:
-            set_startup(args.setup_startup == 'enable', entry_script=Path(__file__).resolve(),
-                        remove_only_matching=args.setup_startup == 'remove-owned')
-            return 0
-        except Exception:
-            return 1
     from utils.flet_runtime import run_desktop
     from utils.auth_service import CampusService
     data_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "CampusLogin"
@@ -1270,17 +1288,29 @@ def main():
                 if not args.minimized:
                     ctypes.windll.user32.MessageBoxW(None, "程序已运行，请从系统托盘打开。", "校园网", 0x40)
                 return 0
-        run_desktop(app, assets_dir=str(resource_path("icon")), hidden=args.minimized)
-    except Exception:
+        service.record_runtime_event('runtime_start')
+        run_desktop(app, assets_dir=str(resource_path("icon")), hidden=args.minimized,
+                    event_sink=service.record_runtime_event)
+    except Exception as error:
+        service.record_runtime_event('runtime_failed', error=error)
         if args.self_test:
             result["ok"] = False
             result["error"] = "Runtime or desktop initialization failed"
         else:
             ctypes.windll.user32.MessageBoxW(None,
-                "程序未能启动。请完整解压发布包，保留 _internal 文件夹，并确认另一版本已经退出。",
+                "程序启动失败或界面异常退出。请查看本地日志（%APPDATA%\\CampusLogin\\logs），"
+                "并检查 Windows 安全中心的保护历史记录。",
                 "校园网", 0x10)
         return 1
     finally:
+        # Renderer exit can bypass CampusUI.exit(). Release the authentication
+        # session in that case as well; never silently restart a blocked app.
+        if guard:
+            try:
+                service.close()
+            except Exception as error:
+                service.record_runtime_event('cleanup_failed', error=error)
+            service.record_runtime_event('runtime_end')
         if guard:
             guard.release()
         if args.self_test and args.test_report:

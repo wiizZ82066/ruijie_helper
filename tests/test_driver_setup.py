@@ -47,3 +47,11 @@ class DriverTests(unittest.TestCase):
         response = SimpleNamespace(returncode=0, stdout=b'')
         with patch.object(setup.subprocess, 'run', return_value=response):
             self.assertEqual(setup.check_driver(), setup.result('ready'))
+
+    def test_security_block_is_not_misreported_as_missing_driver(self):
+        for code in (225, 226):
+            error = OSError('private security path')
+            error.winerror = code
+            with patch.object(setup.subprocess, 'run', side_effect=error) as run:
+                self.assertEqual(setup.check_driver(), setup.result('blocked'))
+                run.assert_called_once()

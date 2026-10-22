@@ -190,6 +190,26 @@ class PeerGuardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LoggingTests(unittest.TestCase):
+    def test_native_crash_is_not_a_successful_desktop_exit(self):
+        exe = fixture_directory(self, 'exit-code') / 'flet.exe'
+        exe.write_bytes(b'synthetic')
+        events = Mock()
+        guard = runtime._PeerGuard(exe, event_sink=events)
+        for code in (0xc0000005, -1073741819, 1, None):
+            guard.process = SimpleNamespace(returncode=code)
+            with self.subTest(code=code), self.assertRaises(runtime.DesktopRuntimeError):
+                guard.verify_exit()
+            events.assert_called_with('desktop_exit', exit_code=code)
+        guard.process.returncode = 0
+        guard.verify_exit()
+
+    def test_diagnostic_failure_does_not_change_normal_exit(self):
+        exe = fixture_directory(self, 'exit-journal') / 'flet.exe'
+        exe.write_bytes(b'synthetic')
+        guard = runtime._PeerGuard(exe, event_sink=Mock(side_effect=OSError('disk unavailable')))
+        guard.process = SimpleNamespace(returncode=0)
+        guard.verify_exit()
+
     def test_protocol_and_control_logs_stay_disabled_even_under_root_debug(self):
         runtime._silence_protocol_logs()
         for name in ("flet", "flet_transport", "flet_object_patch", "flet_controls"):

@@ -5,7 +5,7 @@
   #error ReleaseDir is required
 #endif
 #ifndef AppVersion
-  #define AppVersion "6.2.3"
+  #define AppVersion "6.2.4"
 #endif
 
 [Setup]
@@ -38,7 +38,6 @@ Name: "chinesesimp"; MessagesFile: "{#ChineseMessages}"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："
-Name: "startup"; Description: "开机自启动（后台运行）"; GroupDescription: "启动选项："; Flags: unchecked
 
 [Files]
 Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,10 +49,74 @@ Name: "{autodesktop}\校园网助手"; Filename: "{app}\CampusAuthenticatorFlet.
 [InstallDelete]
 Type: files; Name: "{autodesktop}\校园网助手.lnk"; Check: not WizardIsTaskSelected('desktopicon')
 
-[Run]
-Filename: "{app}\CampusAuthenticatorFlet.exe"; Description: "立即运行校园网助手"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runascurrentuser
-
 [Code]
+var
+  LaunchFailed: Boolean;
+  RunAfterInstall: TNewCheckBox;
+
+function LaunchFailureMessage(Code: Integer): String;
+begin
+  if (Code = 225) or (Code = 226) then
+    Result := 'Windows 安全防护已拦截或隔离助手（错误 ' + IntToStr(Code) + '）。' + #13#10 +
+      '请查看 Windows 安全中心的“保护历史记录”，记录威胁名称并反馈给开发者。' + #13#10 +
+      '无需关闭杀毒防护或添加排除项。安装程序不会再次自动启动助手。'
+  else
+    Result := '助手未能运行（错误 ' + IntToStr(Code) + '）。请检查程序文件是否完整、' +
+      'Windows 安全中心的保护历史记录及本地日志。';
+end;
+
+procedure InitializeWizard;
+begin
+  RunAfterInstall := TNewCheckBox.Create(WizardForm);
+  RunAfterInstall.Parent := WizardForm.FinishedPage;
+  RunAfterInstall.Left := WizardForm.FinishedLabel.Left;
+  RunAfterInstall.Top := WizardForm.FinishedLabel.Top + WizardForm.FinishedLabel.Height + ScaleY(12);
+  RunAfterInstall.Width := WizardForm.FinishedLabel.Width;
+  RunAfterInstall.Caption := '立即运行校园网助手';
+  RunAfterInstall.Checked := True;
+  RunAfterInstall.Visible := False;
+end;
+
+procedure ShowIncompleteInstallation;
+begin
+  RunAfterInstall.Checked := False;
+  RunAfterInstall.Visible := False;
+  WizardForm.FinishedHeadingLabel.Caption := '安装尚需处理';
+  WizardForm.FinishedLabel.Caption := '程序文件已复制，但助手未能运行。' + #13#10 +
+    '本次安装未完成运行验证。请先处理前面的错误提示，再尝试运行。';
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpFinished then begin
+    RunAfterInstall.Visible := not WizardSilent and not LaunchFailed;
+    if LaunchFailed then ShowIncompleteInstallation;
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if LaunchFailed then Result := 20 else Result := 0;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Code: Integer;
+begin
+  Result := True;
+  if (CurPageID = wpFinished) and not WizardSilent and not LaunchFailed and RunAfterInstall.Checked then begin
+    Log('Stage: user requested desktop launch');
+    if not Exec(ExpandConstant('{app}\CampusAuthenticatorFlet.exe'), '', ExpandConstant('{app}'),
+        SW_SHOWNORMAL, ewNoWait, Code) then begin
+      LaunchFailed := True;
+      ShowIncompleteInstallation;
+      Result := False;
+      Log('Helper launch failed, Windows error ' + IntToStr(Code));
+      MsgBox(LaunchFailureMessage(Code), mbError, MB_OK);
+    end else Log('Stage: desktop process created; UI readiness is not yet confirmed');
+  end;
+end;
+
 function CreateFileW(FileName: String; DesiredAccess, ShareMode, SecurityAttributes,
   CreationDisposition, FlagsAndAttributes, TemplateFile: Cardinal): THandle;
   external 'CreateFileW@kernel32.dll stdcall';
@@ -83,19 +146,9 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  Code: Integer;
-  Mode: String;
 begin
-  if CurStep = ssPostInstall then begin
-    if WizardIsTaskSelected('startup') then Mode := 'enable' else Mode := 'disable';
-    if not Exec(ExpandConstant('{app}\CampusAuthenticatorFlet.exe'),
-        '--setup-startup ' + Mode, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code)
-        or (Code <> 0) then begin
-      Log('Startup configuration failed; user must check the app settings.');
-      MsgBox('助手已安装，但开机自启动设置未成功。请打开助手，在设置中重新确认。', mbError, MB_OK);
-    end;
-  end;
+  if CurStep = ssPostInstall then
+    Log('Stage: files installed; startup configuration unchanged; helper not launched');
 end;
 
 function InitializeUninstall: Boolean;

@@ -13,10 +13,11 @@ MESSAGES = {
     'denied': '请以管理员身份重新打开助手',
     'no_interfaces': '驱动已安装，暂未发现可用接口',
     'unknown': '暂时无法确认有线驱动状态',
+    'blocked': '安全防护阻止了环境检测，请查看 Windows 保护历史记录',
 }
 
 
-EXIT_CODES = {'ready': 0, 'missing': 10, 'broken': 11, 'denied': 12, 'no_interfaces': 13, 'unknown': 14}
+EXIT_CODES = {'ready': 0, 'missing': 10, 'broken': 11, 'denied': 12, 'no_interfaces': 13, 'unknown': 14, 'blocked': 15}
 
 
 def result(state):
@@ -53,6 +54,8 @@ def probe_driver():
             if first:
                 dll.pcap_freealldevs(first)
     except OSError as error:
+        if getattr(error, 'winerror', None) in (225, 226):
+            return result('blocked')
         return result('denied' if getattr(error, 'winerror', None) == 5 else 'broken')
     except AttributeError:
         return result('broken')
@@ -70,5 +73,7 @@ def check_driver():
         # paths, native strings or adapter identifiers between processes.
         state = next((key for key, code in EXIT_CODES.items() if code == completed.returncode), 'unknown')
         return result(state)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except OSError as error:
+        return result('blocked' if getattr(error, 'winerror', None) in (225, 226) else 'unknown')
+    except (ValueError, subprocess.TimeoutExpired):
         return result('unknown')

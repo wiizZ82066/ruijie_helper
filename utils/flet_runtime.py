@@ -103,7 +103,7 @@ class _Child:
 class _PeerGuard:
     """Authenticate before Flet's handler can replace its existing connection."""
 
-    def __init__(self, executable: Path):
+    def __init__(self, executable: Path, event_sink=None):
         self.executable = executable.resolve(strict=True)
         self.child: _Child | None = None
         self.registered = asyncio.Event()
@@ -111,6 +111,20 @@ class _PeerGuard:
         self.process = None
         self.pid_file: Path | None = None
         self._launching = False
+        self.event_sink = event_sink
+
+    def emit(self, event, **fields):
+        if self.event_sink is not None:
+            try:
+                self.event_sink(event, **fields)
+            except Exception:
+                pass  # A diagnostic write must not break the desktop lifetime.
+
+    def verify_exit(self):
+        code = self.process.returncode if self.process is not None else None
+        self.emit('desktop_exit', exit_code=code)
+        if code != 0:
+            raise DesktopRuntimeError('Desktop process ended unexpectedly.')
 
     def _register(self, pid: int) -> None:
         process = psutil.Process(pid)
@@ -144,6 +158,7 @@ class _PeerGuard:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             self._register(self.process.pid)
+            self.emit('desktop_started')
             return self.process, pid_file
         except BaseException:
             self.failed = True
@@ -248,7 +263,7 @@ def _replace_attribute(target, name, value):
         setattr(target, name, previous)
 
 
-def run_desktop(main, *, assets_dir=None, hidden=False) -> None:
+def run_desktop(main, *, assets_dir=None, hidden=False, event_sink=None) -> None:
     """Run one pinned native view with peer verification and no web fallback."""
     if sys.platform != "win32":
         raise DesktopRuntimeError("This desktop launcher requires Windows.")
@@ -258,7 +273,7 @@ def run_desktop(main, *, assets_dir=None, hidden=False) -> None:
     app_module = importlib.import_module("flet.app")
     _check_versions()
     executable = validate_runtime()
-    guard = _PeerGuard(executable)
+    guard = _PeerGuard(executable, event_sink=event_sink)
     original = FletSocketServer.handle_connection
 
     async def checked_connection(server, reader, writer):
@@ -277,6 +292,9 @@ def run_desktop(main, *, assets_dir=None, hidden=False) -> None:
                 _replace_attribute(app_module, "ensure_flet_desktop_package_installed", _check_versions):
             ft.run(main, view=ft.AppView.FLET_APP_HIDDEN if hidden else ft.AppView.FLET_APP,
                    assets_dir=assets_dir, port=0)
+            # Flet waits for the Flutter process but does not inspect its exit
+            # code. A native crash must not look like a successful app exit.
+            guard.verify_exit()
     finally:
         guard.cleanup()
         for key in list(os.environ):

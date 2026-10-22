@@ -80,6 +80,18 @@ class ReleaseAuditTests(unittest.TestCase):
         self.assertEqual(result["checked_files"], 1)
         self.assertEqual(result["findings"], [])
 
+    def test_nsis_sources_are_audited_for_secrets_and_machine_paths(self):
+        token = "ghp_" + "b" * 36
+        absolute = "Q" + ":" + "\\" + "build" + "\\" + "app.exe"
+        for suffix in (".nsi", ".nsh"):
+            relative = "installer" + suffix
+            self.write(relative, '; ' + token + '\nFile "' + absolute + '"\n')
+            result = self.audit(relative)
+            self.assertEqual({item["category"] for item in result["findings"]},
+                             {"github_token", "absolute_windows_path_literal"})
+            self.assertNotIn(token, json.dumps(result))
+            self.assertNotIn(absolute, json.dumps(result))
+
     def test_symlink_outside_release_root_is_rejected_without_reading_target(self):
         outside = fixture_directory(self, "release-audit-outside") / "outside.py"
         outside.write_text("synthetic outside file; not Python source", encoding="utf-8")
